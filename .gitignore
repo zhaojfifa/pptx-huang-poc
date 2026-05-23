@@ -1,0 +1,47 @@
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+*.secret
+
+# Python env/cache
+.venv/
+.venv_huang/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+
+# Runtime outputs
+logs/
+output/
+uploads/
+tmp/
+cache/
+artifacts/
+template_uploads/
+.temp_mermaid/
+
+# Logs/temp
+*.log
+*.tmp
+
+# Generated PPT/PNG outputs
+output/*.pptx
+output/*.png
+logs/**/*.png
+logs/**/*.pptx
+uploads/**/*.pptx
+template_uploads/**/*.pptx
+
+# Local DB/runtime files
+*.sqlite
+*.sqlite3
+*.db
+
+# Keep approved source templates only under data/templates/.
+# Do not commit customer uploaded templates by default.

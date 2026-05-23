@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>自定义模板验证 · AI PPT Agent</title>
+<style>
+  *{box-sizing:border-box} body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:linear-gradient(180deg,#eef3fb,#f5f7fa 240px);margin:0;padding:40px 20px 60px;color:#1f2937}
+  .wrap{max-width:1040px;margin:0 auto}
+  .hero{text-align:center;margin-bottom:24px} .hero h1{font-size:28px;color:#0b3d91;margin:0 0 8px} .hero p{color:#5b6b82;margin:0;font-size:14px}
+  .back{display:inline-block;margin-bottom:14px;color:#0b3d91;text-decoration:none;font-size:13px}
+  .card{background:#fff;border-radius:16px;padding:24px 26px;margin-bottom:20px;box-shadow:0 6px 20px rgba(11,61,145,.06);border:1px solid #e9edf4}
+  .card h2{font-size:16px;margin:0 0 4px;color:#0b3d91} .card .sub{color:#6b7a92;font-size:13px;margin:0 0 14px}
+  label{display:block;font-weight:600;color:#41506b;font-size:13.5px;margin:14px 0 7px}
+  textarea,select{width:100%;padding:11px;border:1px solid #d7dde8;border-radius:10px;font-size:14px;font-family:inherit} textarea{min-height:110px;resize:vertical}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+  .btn{padding:13px 24px;background:#0b3d91;color:#fff;border:none;border-radius:11px;font-size:15px;font-weight:700;cursor:pointer} .btn:hover:not(:disabled){background:#0a347d} .btn:disabled{background:#c2cde0;cursor:not-allowed}
+  .btn.ghost{background:#fff;color:#0b3d91;border:1.5px solid #c9d6ec} .btn.green{background:#1d9b54}
+  .drop{border:2px dashed #c9d6ec;border-radius:12px;padding:26px;text-align:center;color:#5b6b82;cursor:pointer;background:#f7faff}
+  .info{background:#eef4ff;border-radius:10px;padding:12px 14px;font-size:13.5px;color:#2c4a86;margin-top:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-top:8px}
+  .pg{border:1px solid #e9edf4;border-radius:12px;overflow:hidden;background:#fcfdff}
+  .pg img{width:100%;display:block;background:#eef1f6;aspect-ratio:16/9;object-fit:cover}
+  .pg .meta{padding:10px 12px;font-size:12px;color:#41506b} .pg .meta b{color:#0b3d91}
+  .pg .warn{color:#b3261e;font-size:11.5px;margin-top:4px}
+  .spin{display:inline-block;width:15px;height:15px;border:2.5px solid rgba(255,255,255,.5);border-top-color:#fff;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:7px}
+  .spin.dk{border-color:#cdd9f0;border-top-color:#0b3d91} @keyframes sp{to{transform:rotate(360deg)}}
+  .hide{display:none!important}
+  .ocard{border:1px solid #e9edf4;border-radius:12px;padding:14px;margin-bottom:12px;background:#fcfdff}
+  .ocard .h{display:flex;gap:10px;align-items:center;margin-bottom:8px} .ocard .p{background:#0b3d91;color:#fff;font-size:12px;font-weight:700;border-radius:8px;padding:3px 9px}
+  .ocard input{font-weight:600;font-size:14px;border:1px solid #e3e9f3;border-radius:7px;padding:6px 8px;width:100%} .ocard textarea{min-height:56px;font-size:13px;margin-top:4px}
+  .ref{display:inline-block;margin-top:12px;background:#f1f4f9;color:#41506b;border-radius:8px;padding:6px 12px;font-size:13px;font-weight:600}
+</style></head>
+<body><div class="wrap">
+  <a class="back" href="/">← 返回主页面</a>
+  <div class="hero"><h1>自定义模板验证</h1><p>上传你的 PPT 母版，系统将解析母版结构并据此生成 PPT。</p></div>
+
+  <!-- Step 1: upload -->
+  <div class="card" id="c-upload">
+    <h2>1 · 上传母版</h2><p class="sub">上传一个 PPTX 母版文件，用于解析其页面结构与风格。</p>
+    <div class="drop" id="drop" onclick="document.getElementById('tpl').click()">
+      点击选择 PPTX 母版文件
+      <div id="up-info" style="margin-top:8px;color:#0b3d91;font-weight:600"></div>
+    </div>
+    <input type="file" id="tpl" class="hide" accept=".pptx" onchange="onUpload(this)">
+    <div class="info hide" id="up-status"></div>
+  </div>
+
+  <!-- Step 2: analyze + index -->
+  <div class="card hide" id="c-index">
+    <h2>2 · 母版解析与页面索引</h2><p class="sub">系统正在理解每一页的结构、类型与可填充区域。</p>
+    <div id="index-status"></div>
+    <div class="grid" id="index-grid"></div>
+    <div style="margin-top:16px"><button class="btn hide" id="btn-to-gen" onclick="showGen()">使用该母版生成 PPT →</button></div>
+  </div>
+
+  <!-- Step 3: content + config -->
+  <div class="card hide" id="c-gen">
+    <h2>3 · 输入需求</h2><p class="sub">描述要生成的 PPT，并选择页数（不超过母版页数）。</p>
+    <label>生成需求</label>
+    <textarea id="prompt" placeholder="例如：基于资料，生成一份面向管理层的年度经营汇报，突出经营成果、关键指标与下一步重点。"></textarea>
+    <div class="row" style="margin-top:6px">
+      <div><label>页数</label><select id="page_count"></select></div>
+      <div><label>受众</label><select id="audience"><option value="management">管理层</option><option value="client">客户</option><option value="internal">内部团队</option><option value="investor">投资人</option></select></div>
+      <div><label>场景</label><select id="scenario"><option value="business_review">经营分析</option><option value="project_report">项目汇报</option><option value="solution">解决方案</option><option value="training">培训材料</option></select></div>
+      <div><label>语气</label><select id="tone"><option value="professional">专业</option><option value="concise">简洁</option><option value="formal">正式</option></select></div>
+      <div><label>语言</label><select id="language"><option value="zh-CN">简体中文</option><option value="en">English</option></select></div>
+    </div>
+    <div style="margin-top:16px"><button class="btn" id="btn-outline" onclick="genOutline()">生成大纲</button></div>
+  </div>
+
+  <!-- Step 4: outline -->
+  <div class="card hide" id="c-outline">
+    <h2>4 · 调整大纲</h2><p class="sub">检查每页标题与要点，可直接编辑，满意后生成 PPT。</p>
+    <div id="outline-list"></div>
+    <div style="margin-top:12px"><button class="btn green" id="btn-confirm" onclick="confirmGen()">确认大纲并生成 PPT</button>
+      <button class="btn ghost" onclick="document.getElementById('c-outline').classList.add('hide');document.getElementById('c-gen').classList.remove('hide')">返回</button></div>
+  </div>
+
+  <!-- Step 5: result -->
+  <div class="card hide" id="c-result"><h2>5 · 生成结果</h2><div id="result"></div></div>
+</div>
+<script>
+let token=null, templateName=null, maxPages=12, currentOutline=[];
+
+async function onUpload(input){
+  if(!input.files.length) return;
+  const f=input.files[0];
+  document.getElementById('up-info').textContent='已选择：'+f.name;
+  const st=document.getElementById('up-status'); st.classList.remove('hide'); st.innerHTML='<span class="spin dk"></span>正在上传母版…';
+  const fd=new FormData(); fd.append('file', f);
+  const r=await fetch('/api/custom-template/upload',{method:'POST',body:fd}); const d=await r.json();
+  if(d.status!=='ok'){ st.innerHTML='上传失败：'+(d.message||''); return; }
+  token=d.template_upload_id; templateName=d.template_name; maxPages=d.page_count;
+  st.innerHTML=`母版已上传：<b>${d.file_name}</b> · ${d.page_count} 页。正在解析…`;
+  startAnalyze();
+}
+async function startAnalyze(){
+  document.getElementById('c-index').classList.remove('hide');
+  await fetch('/api/custom-template/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({template_upload_id:token})});
+  pollAnalyze();
+}
+async function pollAnalyze(){
+  const s=await (await fetch('/api/custom-template/status/'+token)).json();
+  const box=document.getElementById('index-status');
+  if(s.state==='ready'){ box.innerHTML=''; renderIndex(s.index||[]); document.getElementById('btn-to-gen').classList.remove('hide'); return; }
+  if(s.state==='failed'){ box.innerHTML='母版解析失败，请更换母版重试。'; return; }
+  box.innerHTML='<span class="spin dk"></span>正在解析母版（'+(s.step||'分析中')+'）… 母版较复杂时需要数分钟。';
+  setTimeout(pollAnalyze, 5000);
+}
+function renderIndex(idx){
+  const g=document.getElementById('index-grid'); g.innerHTML='';
+  idx.forEach(p=>{
+    const w=(p.warnings||[]).map(x=>`<div class="warn">⚠ ${x}</div>`).join('');
+    g.innerHTML+=`<div class="pg"><img src="${p.thumbnail}" loading="lazy" onerror="this.style.opacity=.3">
+      <div class="meta">第 ${p.page} 页 · <b>${p.page_type}</b><br>可填区:${p.content_slots} 标签:${p.label_slots} 表:${p.tables} 图:${p.pictures}${w}</div></div>`;
+  });
+}
+function showGen(){
+  document.getElementById('c-gen').classList.remove('hide');
+  const sel=document.getElementById('page_count'); sel.innerHTML='';
+  [8,10,12].filter(v=>v<=maxPages).forEach(v=>sel.innerHTML+=`<option value="${v}" ${v===Math.min(12,maxPages)?'selected':''}>${v} 页</option>`);
+  if(![8,10,12].some(v=>v<=maxPages)) sel.innerHTML=`<option value="${maxPages}">${maxPages} 页</option>`;
+  window.scrollTo({top:document.getElementById('c-gen').offsetTop-20,behavior:'smooth'});
+}
+function payload(extra){
+  return Object.assign({prompt:document.getElementById('prompt').value.trim(),input_mode:'text',
+    source_document_name:'',template_name:templateName,template_key:templateName,
+    page_count:+document.getElementById('page_count').value,audience:document.getElementById('audience').value,
+    scenario:document.getElementById('scenario').value,tone:document.getElementById('tone').value,
+    language:document.getElementById('language').value}, extra||{});
+}
+async function genOutline(){
+  const b=document.getElementById('btn-outline'); b.disabled=true; b.innerHTML='<span class="spin"></span>正在生成大纲…';
+  try{
+    const d=await (await fetch('/api/custom-template/outline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())})).json();
+    if(d.status==='error'){ alert(d.message); return; }
+    currentOutline=d.outline||[]; renderOutline();
+    document.getElementById('c-outline').classList.remove('hide');
+    window.scrollTo({top:document.getElementById('c-outline').offsetTop-20,behavior:'smooth'});
+  }finally{ b.disabled=false; b.textContent='生成大纲'; }
+}
+function renderOutline(){
+  const w=document.getElementById('outline-list'); w.innerHTML='';
+  currentOutline.forEach((p,i)=>{ w.innerHTML+=`<div class="ocard"><div class="h"><span class="p">第 ${p.page} 页</span><span style="font-size:12px;color:#8a97ad">${p.section||''}</span></div>
+    <input value="${(p.title||'').replace(/"/g,'&quot;')}" oninput="currentOutline[${i}].title=this.value">
+    <textarea oninput="currentOutline[${i}].points=this.value.split('\\n').map(s=>s.trim()).filter(Boolean)">${(p.points||[]).join('\n')}</textarea></div>`; });
+}
+async function confirmGen(){
+  document.getElementById('c-result').classList.remove('hide');
+  const rb=document.getElementById('result'); rb.innerHTML='<span class="spin dk"></span>正在按你的大纲生成 PPT…';
+  window.scrollTo({top:document.getElementById('c-result').offsetTop-20,behavior:'smooth'});
+  const d=await (await fetch('/api/custom-template/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload({outline:currentOutline}))})).json();
+  if(d.ready && d.job_id) pollGen(d.job_id, d.reference); else rb.innerHTML=`<div>${d.message||'已提交。'}</div><div class="ref">编号：${d.reference||'—'}</div>`;
+}
+async function pollGen(jid, ref){
+  const rb=document.getElementById('result');
+  const s=await (await fetch('/api/poc/status/'+jid)).json();
+  if(s.state==='done'){ rb.innerHTML=`<div style="font-size:18px;font-weight:700;color:#0b3d91">🎉 PPT 已生成</div><div class="ref">编号：${ref}</div><div style="margin-top:14px"><a class="btn green" href="${s.download_url}">下载 PPT</a></div>`; return; }
+  if(s.state==='failed'){ rb.innerHTML='生成失败，请稍后重试。'; return; }
+  rb.innerHTML=`<span class="spin dk"></span>正在生成（${s.step||'处理中'}）…<div class="ref">编号：${ref}</div>`;
+  setTimeout(()=>pollGen(jid,ref),4000);
+}
+</script></body></html>
