@@ -51,3 +51,13 @@ LibreOffice (`soffice`) and `pypdfium2` for the macOS screenshot backend.
 - Source baseline commit: `4fd3cdb`
 - Strategy: the Huang independent POC path is the source of truth; old main architecture
   fusion is deferred until after POC validation.
+
+## Relationship to ppt-agent-poc
+
+This repo is the independent Huang POC path.
+
+The original `ppt-agent-poc` repo remains the historical main architecture and future fusion reference.
+
+See:
+
+docs/MAINLINE_RELATIONSHIP_AND_FUSION_NOTES.md
