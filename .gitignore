@@ -45,3 +45,14 @@ template_uploads/**/*.pptx
 
 # Keep approved source templates only under data/templates/.
 # Do not commit customer uploaded templates by default.
+
+# Local-only assets (not committed by default)
+# Local source templates are not committed by default.
+# Approved templates should be placed under data/templates/ and may require Git LFS approval.
+# Preview renders and scratch test files are local-only.
+templates_storage/
+static/previews/
+test.mmd
+test_diag.mmd
+test_template.pptx
+test_with_chart.pptx

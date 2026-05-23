@@ -50,3 +50,25 @@ Custom page:
 - template cleaning is not automatic yet
 - trend / line chart capability is not implemented yet
 - not public deployment
+
+## Local Environment Setup
+
+```bash
+cd /Users/tylerzhao/Code/pptx-huang-poc
+python3 -m venv .venv_huang
+.venv_huang/bin/pip install --upgrade pip
+.venv_huang/bin/pip install -r requirements.txt
+```
+
+Then start:
+
+```bash
+.venv_huang/bin/uvicorn web.app:app --host 0.0.0.0 --port 8000
+```
+
+Notes:
+
+- `.env` is required for real Kimi / model calls.
+- Do not commit `.env`.
+- MySQL / template DB state may be required for full generation.
+- For UI smoke test, route import can be checked before full generation.
