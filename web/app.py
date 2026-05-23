@@ -6,7 +6,9 @@ Provides interactive endpoints for each pipeline step.
 
 import json
 import logging
+import re
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -280,7 +282,14 @@ def list_templates():
 # ----------------------------------------------------------------------------
 import threading
 
-_EXAMPLE_DOC = BASE_DIR / "logs" / "job_62" / "document_markdown.md"
+# Bundled, in-repo example source document (real content → grounds the default flow).
+# Falls back to a legacy checkpoint if the bundled sample is ever missing.
+_EXAMPLE_DOC = BASE_DIR / "data" / "samples" / "baosteel_2025_example.md"
+_EXAMPLE_DOC_FALLBACK = BASE_DIR / "logs" / "job_62" / "document_markdown.md"
+
+# In-memory cache for uploaded business documents (POC): token -> parsed markdown.
+_SOURCE_UPLOADS: dict[str, dict] = {}
+
 _AUDIENCE = {"management": "管理层", "client": "客户", "internal": "内部团队", "investor": "投资人"}
 _SCENARIO = {"business_review": "经营分析", "project_report": "项目汇报", "solution": "解决方案", "training": "培训材料"}
 _TONE = {"professional": "专业", "concise": "简洁", "formal": "正式"}
@@ -290,11 +299,50 @@ _LANG = {"zh-CN": "简体中文", "en": "English"}
 _GEN_STATUS: dict[int, dict] = {}
 
 
-def _source_markdown(input_mode: str, source_name: str) -> str:
-    """Resolve the source document text for the chosen input mode."""
-    if input_mode == "example" and _EXAMPLE_DOC.exists():
-        return _EXAMPLE_DOC.read_text(encoding="utf-8")
-    return ""  # manual/text/upload(not wired): outline driven by the prompt only
+def _source_markdown(input_mode: str, source_name: str = None, source_token: str = None) -> str:
+    """Resolve the source document text for the chosen input mode.
+
+    - upload: parsed markdown of the uploaded business doc (cached by token).
+    - example: the bundled in-repo sample (real content), with legacy fallback.
+    - manual/text: empty (outline driven by the prompt only).
+    """
+    if source_token and source_token in _SOURCE_UPLOADS:
+        return _SOURCE_UPLOADS[source_token].get("markdown", "") or ""
+    if input_mode == "example":
+        if _EXAMPLE_DOC.exists():
+            return _EXAMPLE_DOC.read_text(encoding="utf-8")
+        if _EXAMPLE_DOC_FALLBACK.exists():
+            return _EXAMPLE_DOC_FALLBACK.read_text(encoding="utf-8")
+    return ""
+
+
+def _extract_key_facts(doc_md: str, limit: int = 12) -> list[str]:
+    """Cheap, no-LLM extraction of fact/metric lines (numbers/%/¥/同比) for grounding."""
+    if not doc_md:
+        return []
+    fact_re = re.compile(r"(\d|%|％|¥|亿|万|同比|环比|增长|下降|占比|利润|营收|产量)")
+    facts = []
+    for raw in doc_md.splitlines():
+        line = raw.strip().lstrip("-*•· ").strip()
+        if len(line) < 6 or line.startswith("#") or line.startswith(">"):
+            continue
+        if fact_re.search(line):
+            facts.append(line)
+        if len(facts) >= limit:
+            break
+    return facts
+
+
+def _ground_doc(doc_md: str) -> str:
+    """Prepend a compact 关键事实/数据 block so both outline and per-slide prompts
+    receive distilled metrics in addition to the full document. No-op if empty."""
+    if not doc_md:
+        return ""
+    facts = _extract_key_facts(doc_md)
+    if not facts:
+        return doc_md
+    block = "## 关键事实/数据（自动提炼，供生成时严格依据）\n" + "\n".join(f"- {f}" for f in facts)
+    return block + "\n\n" + doc_md
 
 
 def _compose_requirements(payload: dict) -> str:
@@ -403,8 +451,16 @@ def poc_outline(payload: dict = Body(...)):
 
     if template and len(pages) >= _MIN_USABLE_PAGES:
         requirements = _compose_requirements(payload)
-        doc_md = _source_markdown(payload.get("input_mode"), payload.get("source_document_name"))
+        raw_doc = _source_markdown(payload.get("input_mode"), payload.get("source_document_name"),
+                                   payload.get("source_token"))
+        doc_md = _ground_doc(raw_doc)
         job_id = agent.start_job(requirements, [])
+        logger.info(
+            f"Job {job_id}: source grounding — input_mode={payload.get('input_mode')!r} "
+            f"token={'yes' if payload.get('source_token') else 'no'} "
+            f"raw_chars={len(raw_doc)} grounded_chars={len(doc_md)} "
+            f"key_facts={len(_extract_key_facts(raw_doc))}"
+        )
         GenerationJobDAO.update(job_id, selected_template_id=template["id"])
         if doc_md:
             agent._save_checkpoint(job_id, "document_markdown.md", doc_md)
@@ -465,7 +521,14 @@ def poc_generate(payload: dict = Body(...)):
         GenerationJobDAO.update(job_id, selected_template_id=template["id"],
                                 outline_json=outline)
         _write_selected_template(job_id, template, payload, len(pages))
-    doc_md = _source_markdown(payload.get("input_mode"), payload.get("source_document_name"))
+    raw_doc = _source_markdown(payload.get("input_mode"), payload.get("source_document_name"),
+                               payload.get("source_token"))
+    doc_md = _ground_doc(raw_doc)
+    logger.info(
+        f"Job {job_id}: generate source grounding — input_mode={payload.get('input_mode')!r} "
+        f"token={'yes' if payload.get('source_token') else 'no'} "
+        f"raw_chars={len(raw_doc)} grounded_chars={len(doc_md)}"
+    )
     if doc_md:
         agent._save_checkpoint(job_id, "document_markdown.md", doc_md)
     agent._save_checkpoint(job_id, "confirmed_outline.json", agent._json_dumps(outline))
@@ -490,6 +553,33 @@ def poc_status(job_id: int):
     if st.get("state") == "done":
         out["download_url"] = f"/api/jobs/{job_id}/download/final"
     return out
+
+
+@app.post("/api/poc/source/upload")
+async def poc_source_upload(file: UploadFile = File(...)):
+    """Parse an uploaded business document into markdown and cache it by token.
+    The token is passed back in the outline/generate payloads as `source_token`,
+    so the uploaded content actually grounds generation (previously only the
+    filename was sent and the content was discarded)."""
+    upload_dir = BASE_DIR / "uploads"
+    upload_dir.mkdir(exist_ok=True)
+    safe_name = Path(file.filename or "source").name
+    dest = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
+    dest.write_bytes(await file.read())
+    try:
+        from core.document_processor import DocumentProcessor
+        markdown = DocumentProcessor().process([str(dest)])
+    except Exception as e:
+        logger.error(f"Source upload parse failed for {safe_name}: {e}")
+        return JSONResponse({"status": "error", "error": f"解析失败：{e}"}, status_code=500)
+    if not markdown or not markdown.strip():
+        return JSONResponse({"status": "error", "error": "无法从该文件提取文本内容。"},
+                            status_code=422)
+    token = uuid.uuid4().hex
+    _SOURCE_UPLOADS[token] = {"name": safe_name, "markdown": markdown}
+    logger.info(f"Source upload parsed: {safe_name} → {len(markdown)} chars, token={token[:8]}…")
+    return {"status": "ok", "source_token": token, "source_document_name": safe_name,
+            "markdown_chars": len(markdown), "key_facts": len(_extract_key_facts(markdown))}
 
 
 # ============================================================================

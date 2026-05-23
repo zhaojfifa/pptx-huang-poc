@@ -330,6 +330,11 @@ Return JSON:
         relevant_doc = self._extract_relevant_doc(document_markdown, slide_outline)
         relevant_doc = self._summarize_relevant_doc(relevant_doc, slide_outline)
         doc_summary = self.summarize_document(document_markdown, job_id=job_id)
+        logger.info(
+            f"Slide {slide_outline.get('slide_number')} source context — "
+            f"doc_present={bool(document_markdown)} "
+            f"relevant_chars={len(relevant_doc)} summary_chars={len(doc_summary)}"
+        )
 
         # Load generation hints from template page if available
         generation_hints = template_page.get("generation_hints") if isinstance(template_page, dict) else None

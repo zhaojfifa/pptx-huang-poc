@@ -57,3 +57,9 @@ test.mmd
 test_diag.mmd
 test_template.pptx
 test_with_chart.pptx
+
+# Local/stub PPTX binaries under data/ are not committed (real masters live in
+# templates_storage/ and the approved local source location). Non-binary data
+# (README, samples, templates metadata) remains trackable.
+data/*.pptx
+data/**/*.pptx

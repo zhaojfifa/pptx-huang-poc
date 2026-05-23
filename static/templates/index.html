@@ -175,6 +175,7 @@ const TEMPLATES = {
 let selectedTemplate = TEMPLATES.business;
 let inputMode = "example";                 // 'upload' | 'example' | 'text'
 let sourceDocumentName = "宝钢 2025 年报示例";
+let sourceToken = null;                     // set after a business doc is uploaded & parsed
 let currentOutline = [];
 
 // ---------- step bar ----------
@@ -188,21 +189,38 @@ function setSteps(active, done=[]) {
 
 // ---------- input ----------
 function pickExample() {
-    inputMode = "example"; sourceDocumentName = "宝钢 2025 年报示例";
+    inputMode = "example"; sourceDocumentName = "宝钢 2025 年报示例"; sourceToken = null;
     document.getElementById('src-example').classList.add('active');
     document.getElementById('src-upload').classList.remove('active');
     document.getElementById('example-picked').style.display = 'block';
     document.getElementById('upload-picked').style.display = 'none';
     refreshOutlineBtn();
 }
-function pickUpload(input) {
+async function pickUpload(input) {
     if (!input.files.length) return;
-    inputMode = "upload"; sourceDocumentName = input.files[0].name;
+    inputMode = "upload"; sourceDocumentName = input.files[0].name; sourceToken = null;
     document.getElementById('src-upload').classList.add('active');
     document.getElementById('src-example').classList.remove('active');
-    const p = document.getElementById('upload-picked');
-    p.textContent = "已选择：" + sourceDocumentName; p.style.display = 'block';
     document.getElementById('example-picked').style.display = 'none';
+    const p = document.getElementById('upload-picked');
+    p.style.display = 'block';
+    p.textContent = "正在解析：" + sourceDocumentName + " …";
+    document.getElementById('btn-outline').disabled = true;
+    try {
+        const fd = new FormData();
+        fd.append('file', input.files[0]);
+        const resp = await fetch('/api/poc/source/upload', { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (resp.ok && data.status === 'ok') {
+            sourceToken = data.source_token;
+            p.textContent = "已解析：" + sourceDocumentName +
+                "（" + data.markdown_chars + " 字，关键数据 " + data.key_facts + " 条）";
+        } else {
+            p.textContent = "解析失败：" + (data.error || '请重试') + "（可改用示例资料）";
+        }
+    } catch (e) {
+        p.textContent = "上传失败：" + e + "（可改用示例资料）";
+    }
     refreshOutlineBtn();
 }
 function onPrompt() {
@@ -237,6 +255,7 @@ function outlinePayload() {
         prompt: document.getElementById('prompt').value.trim(),
         input_mode: inputMode,
         source_document_name: sourceDocumentName,
+        source_token: sourceToken,
         template_key: selectedTemplate.key,
         template_name: selectedTemplate.name,
         page_count: +document.getElementById('page_count').value,
@@ -252,6 +271,8 @@ function generatePayload() {
         template_key: selectedTemplate.key,
         template_name: selectedTemplate.name,
         source_document_name: sourceDocumentName,
+        source_token: sourceToken,
+        input_mode: inputMode,
         prompt: document.getElementById('prompt').value.trim(),
         generation_options: {
             page_count: +document.getElementById('page_count').value,
