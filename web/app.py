@@ -434,6 +434,144 @@ def _mock_outline_cards(payload: dict) -> list:
     return cards
 
 
+# ---------------------------------------------------------------------------
+# Quality gates (PR-Q1b/Q1c): outline quality, slot fragmentation, contamination.
+# All gates are advisory for this PR — they log/persist warnings and never block
+# generation (except a clearly unusable empty outline). No secrets are recorded.
+# ---------------------------------------------------------------------------
+_GENERIC_TERMS = ["建设背景", "关键能力", "应用成效", "下一步计划", "总体目标", "技术底座",
+                  "核心组件", "价值闭环", "应对策略", "演进路线", "总体概述", "概述"]
+_FACT_RE = re.compile(r"[0-9０-９]|%|％|¥|亿|万|同比|环比|增长|下降|占比")
+
+# Final-PPTX forbidden/suspicious terms (old-template contamination + internals).
+_FORBIDDEN_TERMS = ["穿透监管", "穿透式监管", "VPN", "SD-WAN", "集团专线", "是否模型",
+                    "指标规则", "模型场景", "1模型", "多个规则", "CMCC", "OneCity",
+                    "template_id", "Huang", "Kimi", "localhost", "sk-"]
+
+
+def _write_report(job_id: int, filename: str, data: dict):
+    """Persist a gate report under logs/job_<id>/ (no secrets in payload)."""
+    try:
+        agent._save_checkpoint(job_id, filename, json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.warning(f"Job {job_id}: failed to write {filename}: {e}")
+
+
+def _outline_quality_gate(cards: list, doc_md: str, requested_pages: int,
+                          template_pages: int) -> dict:
+    """Lightweight advisory checks on the outline before per-slide generation."""
+    warnings = []
+    titles = [(c.get("title") or "").strip() for c in cards]
+
+    # 1) duplicate / near-duplicate titles
+    seen = {}
+    for i, t in enumerate(titles):
+        key = re.sub(r"[：:·\s]", "", t)
+        if key and key in seen:
+            warnings.append(f"duplicate_title: '{t}' (slides {seen[key] + 1} & {i + 1})")
+        elif key:
+            seen[key] = i
+
+    # 2) empty or generic slide titles
+    for i, t in enumerate(titles):
+        if not t:
+            warnings.append(f"empty_title: slide {i + 1}")
+        elif t in _GENERIC_TERMS or len(t) <= 2:
+            warnings.append(f"generic_title: slide {i + 1} '{t}'")
+
+    # 3) empty key_points on narrative-type slides (cover/ending may be empty)
+    for i, c in enumerate(cards):
+        ty = (c.get("type") or "content")
+        if ty in ("content", "chart", "summary", "section") and not (c.get("points") or []):
+            warnings.append(f"empty_key_points: slide {i + 1} ({ty})")
+
+    # 4) too many generic phrasings without business facts
+    generic_hits = sum(1 for t in titles if any(g in t for g in _GENERIC_TERMS))
+    if generic_hits >= max(3, len(cards) // 3):
+        warnings.append(f"high_generic_titles: {generic_hits} slides use generic phrasing")
+
+    # 5) page-count mismatch
+    if requested_pages and len(cards) != requested_pages:
+        warnings.append(f"page_count_mismatch: outline {len(cards)} vs requested {requested_pages}")
+    if template_pages and len(cards) != template_pages:
+        warnings.append(f"template_page_mismatch: outline {len(cards)} vs template {template_pages}")
+
+    # 6) no source-backed facts even though grounding is available
+    if doc_md and _extract_key_facts(doc_md):
+        joined = " ".join(titles + [str(p) for c in cards for p in (c.get("points") or [])])
+        if not _FACT_RE.search(joined):
+            warnings.append("no_source_facts_in_outline: grounding available but outline has no numbers/metrics")
+
+    return {"slides": len(cards), "warning_count": len(warnings), "warnings": warnings,
+            "unusable": len(cards) == 0}
+
+
+def _slot_fragmentation_report(template_pages: list, cards: list) -> dict:
+    """Detect dense-label / low-capacity template pages and narrative slides mapped
+    onto them. Advisory only — does not change mapping."""
+    from core.template_style_engine import TemplateStyleEngine
+    pages_report = []
+    for i, tp in enumerate(template_pages):
+        try:
+            bp = TemplateStyleEngine(tp).blueprint
+        except Exception as e:
+            pages_report.append({"slide": i + 1, "error": str(e)})
+            continue
+        slots = bp.get("slots", {}) or {}
+        content = slots.get("content", []) or []
+        labels = slots.get("labels", []) or []
+        caps = [s.get("_capacity", {}).get("total_chars", 0) for s in content]
+        avg_cap = int(sum(caps) / len(caps)) if caps else 0
+        warns = []
+        if (len(content) + len(labels)) >= 20:
+            warns.append("very_high_slot_count")
+        if labels and len(labels) >= 2 * max(1, len(content)):
+            warns.append("label_dominated")
+        if content and avg_cap < 30:
+            warns.append("small_avg_capacity")
+        card = cards[i] if i < len(cards) else {}
+        ctype = (card.get("type") or "content")
+        if ctype in ("content", "summary") and len(labels) >= 12 and len(content) <= 2:
+            warns.append("narrative_on_dense_label_page")
+        pages_report.append({"slide": i + 1, "type": ctype,
+                             "content_slots": len(content), "label_slots": len(labels),
+                             "avg_content_capacity": avg_cap, "warnings": warns})
+    flagged = [p["slide"] for p in pages_report if p.get("warnings")]
+    return {"flagged_count": len(flagged), "flagged_pages": flagged, "pages": pages_report}
+
+
+def _final_contamination_scan(pptx_path: str) -> dict:
+    """Scan visible text + tables + speaker notes + docProps for forbidden/suspicious
+    terms. Records hit COUNTS only (never the matched secret value)."""
+    from pptx import Presentation
+    texts = []
+    try:
+        prs = Presentation(pptx_path)
+        for s in prs.slides:
+            for sh in s.shapes:
+                if sh.has_text_frame:
+                    texts.append(sh.text_frame.text)
+                if sh.has_table:
+                    for row in sh.table.rows:
+                        for cell in row.cells:
+                            texts.append(cell.text)
+            if s.has_notes_slide and s.notes_slide.notes_text_frame:
+                texts.append(s.notes_slide.notes_text_frame.text)
+        cp = prs.core_properties
+        texts += [cp.title or "", cp.author or "", cp.subject or "",
+                  cp.comments or "", cp.keywords or "", cp.category or ""]
+    except Exception as e:
+        return {"clean": False, "error": str(e)}
+    full = "\n".join(texts)
+    hits = {}
+    for term in _FORBIDDEN_TERMS:
+        n = full.count(term)
+        if n:
+            hits[term] = n  # count only; never store the matched text
+    return {"clean": len(hits) == 0, "total_hits": sum(hits.values()),
+            "hit_terms": hits, "scanned_chars": len(full)}
+
+
 @app.post("/api/poc/outline")
 def poc_outline(payload: dict = Body(...)):
     """Generate an editable outline. Calls Kimi when the chosen template has
@@ -470,8 +608,13 @@ def poc_outline(payload: dict = Body(...)):
                 requirements, doc_md, template, pages, job_id=job_id)
             cards = _outline_to_cards(outline)
             if cards:
+                gate = _outline_quality_gate(cards, doc_md, req_pages, len(pages))
+                _write_report(job_id, "outline_quality_report.json", gate)
+                if gate["warnings"]:
+                    logger.warning(f"Job {job_id}: outline quality warnings: {gate['warnings']}")
                 return {"status": "ok", "source": "kimi", "job_id": job_id,
-                        "template_name": template["name"], "page_count": len(cards), "outline": cards}
+                        "template_name": template["name"], "page_count": len(cards),
+                        "outline": cards, "quality_warnings": gate["warnings"]}
         except Exception as e:
             logger.error(f"Kimi outline failed, using fallback: {e}")
 
@@ -492,7 +635,14 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
         _GEN_STATUS[job_id]["step"] = "render"
         agent.step_render_preview(job_id, layouts)
         final_path = agent.step_generate_final(job_id, layouts)
-        _GEN_STATUS[job_id] = {"state": "done", "final_path": final_path}
+        # Final PPTX hygiene scan (advisory; does not block this PR).
+        contamination = _final_contamination_scan(final_path)
+        _write_report(job_id, "final_contamination_report.json", contamination)
+        if not contamination.get("clean"):
+            logger.warning(f"Job {job_id}: contamination scan hits: {contamination.get('hit_terms')}")
+        _GEN_STATUS[job_id] = {"state": "done", "final_path": final_path,
+                               "contamination_clean": contamination.get("clean"),
+                               "contamination_hits": contamination.get("hit_terms", {})}
     except Exception as e:
         logger.error(f"Generation failed for job {job_id}: {e}")
         _GEN_STATUS[job_id] = {"state": "failed", "error": str(e)}
@@ -533,6 +683,16 @@ def poc_generate(payload: dict = Body(...)):
         agent._save_checkpoint(job_id, "document_markdown.md", doc_md)
     agent._save_checkpoint(job_id, "confirmed_outline.json", agent._json_dumps(outline))
 
+    # Quality gates (advisory) — persisted under this (final) job for co-located evidence.
+    gate = _outline_quality_gate(cards, doc_md, len(cards), len(pages))
+    _write_report(job_id, "outline_quality_report.json", gate)
+    frag = _slot_fragmentation_report(pages, cards)
+    _write_report(job_id, "slot_fragmentation_report.json", frag)
+    if gate["warnings"]:
+        logger.warning(f"Job {job_id}: outline quality warnings: {gate['warnings']}")
+    if frag["flagged_pages"]:
+        logger.warning(f"Job {job_id}: slot fragmentation flagged pages: {frag['flagged_pages']}")
+
     if ready:
         _GEN_STATUS[job_id] = {"state": "generating", "step": "queued"}
         threading.Thread(target=_run_generation, args=(job_id, outline, doc_md, template), daemon=True).start()
@@ -543,7 +703,9 @@ def poc_generate(payload: dict = Body(...)):
 
     return {"status": "submitted", "reference": f"PPT-{job_id:04d}", "job_id": job_id,
             "template_name": payload.get("template_name"), "outline_pages": len(cards),
-            "ready": ready, "message": msg}
+            "ready": ready, "message": msg,
+            "quality_warnings": gate["warnings"],
+            "slot_fragmentation_flagged": frag["flagged_pages"]}
 
 
 @app.get("/api/poc/status/{job_id}")
