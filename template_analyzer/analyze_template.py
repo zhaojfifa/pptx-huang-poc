@@ -486,11 +486,16 @@ def main():
         logger.error(f"Input file not found: {input_path}")
         sys.exit(1)
 
-    # Copy template to storage
+    # Copy template to storage. When the input already lives at the destination
+    # (e.g. /custom uploads land directly in templates_storage/), skip the copy to
+    # avoid shutil.SameFileError and just reuse the existing file.
     TEMPLATES_DIR.mkdir(exist_ok=True)
     stored_path = TEMPLATES_DIR / input_path.name
     import shutil
-    shutil.copy(str(input_path), str(stored_path))
+    if input_path.resolve() == stored_path.resolve():
+        logger.info("source and destination are same; reuse existing template file")
+    else:
+        shutil.copy(str(input_path), str(stored_path))
 
     logger.info(f"Analyzing template: {input_path}")
 
