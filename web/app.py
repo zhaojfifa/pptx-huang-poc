@@ -766,15 +766,22 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
         chart_rebind = None
         if (template or {}).get("name") == "科技蓝风格":
             from core.native_chart_rebind import rebind_native_charts
+            # PR-Q2F restraint: P7 has six tiny (~1.9") charts; a single 4-point series keeps
+            # each mini-chart readable instead of crowding 8 bars into it.
             chart_rebind = rebind_native_charts(
                 final_path,
                 categories=["Q1", "Q2", "Q3", "Q4"],
-                series=[("营业收入", (728.8, 784.9, 810.6, 850.7)),
-                        ("归母净利润", (24.3, 24.5, 30.8, 23.9))],
+                series=[("营收(亿元)", (728.8, 784.9, 810.6, 850.7))],
                 only_slide_numbers=[7],
             )
             _write_report(job_id, "native_chart_rebind_report.json", chart_rebind)
             logger.info(f"Job {job_id}: native chart rebind P7 → {chart_rebind}")
+        # PR-Q2F polish (all decks): agenda titles + numbering strip + placeholder cleanup.
+        from core.deck_polish import polish_deck
+        ag = _agenda_consistency(outline.get("slides", []))
+        polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"))
+        _write_report(job_id, "template_placeholder_cleanup_report.json", polish)
+        logger.info(f"Job {job_id}: deck polish → {polish.get('summary')}")
         # Final PPTX hygiene scan (advisory; does not block this PR).
         contamination = _final_contamination_scan(final_path)
         _write_report(job_id, "final_contamination_report.json", contamination)
@@ -783,7 +790,8 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
         _GEN_STATUS[job_id] = {"state": "done", "final_path": final_path,
                                "contamination_clean": contamination.get("clean"),
                                "contamination_hits": contamination.get("hit_terms", {}),
-                               "chart_rebind": chart_rebind}
+                               "chart_rebind": chart_rebind,
+                               "polish": polish.get("summary") if polish else None}
     except Exception as e:
         logger.error(f"Generation failed for job {job_id}: {e}")
         _GEN_STATUS[job_id] = {"state": "failed", "error": str(e)}
