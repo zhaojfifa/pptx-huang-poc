@@ -782,6 +782,13 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
         polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"))
         _write_report(job_id, "template_placeholder_cleanup_report.json", polish)
         logger.info(f"Job {job_id}: deck polish → {polish.get('summary')}")
+        # PR-Q2G typography & slot-hierarchy polish (all decks; charts untouched).
+        from core.typography_polish import typography_polish
+        typo = typography_polish(final_path)
+        _write_report(job_id, "typography_audit_report.json", typo)
+        logger.info(f"Job {job_id}: typography polish → tables={typo.get('table_count')} "
+                    f"body_capped={typo.get('table_body_runs_capped')} "
+                    f"text_changed={typo.get('text_changed_shapes')}")
         # Final PPTX hygiene scan (advisory; does not block this PR).
         contamination = _final_contamination_scan(final_path)
         _write_report(job_id, "final_contamination_report.json", contamination)
@@ -791,7 +798,10 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
                                "contamination_clean": contamination.get("clean"),
                                "contamination_hits": contamination.get("hit_terms", {}),
                                "chart_rebind": chart_rebind,
-                               "polish": polish.get("summary") if polish else None}
+                               "polish": polish.get("summary") if polish else None,
+                               "typography": {"tables": typo.get("table_count"),
+                                              "table_body_capped": typo.get("table_body_runs_capped"),
+                                              "text_changed": typo.get("text_changed_shapes")}}
     except Exception as e:
         logger.error(f"Generation failed for job {job_id}: {e}")
         _GEN_STATUS[job_id] = {"state": "failed", "error": str(e)}
