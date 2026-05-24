@@ -284,6 +284,17 @@ Return JSON:
         _tkey = slide_outline.get("_template_key")
         page_type_block = f"=== 页面类型指引 ===\n{ptp.content_guidance(_ptype, _tkey)}"
 
+        # Agenda-to-slides consistency injection (top-down): keep this slide as a supporting
+        # detail under its assigned agenda section; do not drift to unrelated themes.
+        _agenda_section = (slide_outline.get("_agenda_section") or "").strip()
+        if _agenda_section and _ptype not in ("cover", "agenda", "closing"):
+            page_type_block += (
+                f"\n=== 目录归属（必须遵守）===\n"
+                f"本页隶属目录章节：「{_agenda_section}」。"
+                f"请将本页内容作为该章节的分论展开/支撑细节来生成，"
+                f"紧扣该章节主题，禁止引入与该章节无关的其它主题。"
+            )
+
         # Build row-aware slot specifications
         slot_specs = []
         for row_idx, row in enumerate(rows):

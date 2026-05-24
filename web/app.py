@@ -393,6 +393,95 @@ def _cards_to_slides(cards: list, template_key: str = None) -> dict:
     return {"title": (cards[0].get("title") if cards else "企业经营汇报"), "slides": slides}
 
 
+def _bigrams(text: str) -> set:
+    t = re.sub(r"[\s，。、：:·\-（）()【】\[\]/]+", "", text or "")
+    return {t[i:i + 2] for i in range(len(t) - 1)} if len(t) >= 2 else ({t} if t else set())
+
+
+def _similarity(a: str, b: str) -> float:
+    """Lightweight char-bigram Jaccard, no LLM."""
+    ba, bb = _bigrams(a), _bigrams(b)
+    if not ba or not bb:
+        return 0.0
+    return len(ba & bb) / len(ba | bb)
+
+
+_AGENDA_TYPES = {"agenda", "section", "toc"}
+_SKIP_TYPES = {"title", "cover", "ending", "closing", "thanks"}
+
+
+def _agenda_consistency(slides: list, threshold: float = 0.12) -> dict:
+    """Map body slides to agenda items (top-down check) and tag each slide in place with
+    `_agenda_section` for prompt injection. Advisory: returns a report, never blocks."""
+    # 1) detect agenda slide
+    agenda_idx = None
+    for i, s in enumerate(slides):
+        ty = (s.get("type") or "").lower()
+        title = s.get("title") or ""
+        if ty in _AGENDA_TYPES or any(k in title for k in ("目录", "提纲", "议程", "汇报内容", "Agenda")):
+            agenda_idx = i
+            break
+    if agenda_idx is None and len(slides) >= 2:
+        agenda_idx = 1  # conventional 2nd slide fallback
+
+    agenda_items = []
+    if agenda_idx is not None:
+        a = slides[agenda_idx]
+        agenda_items = [str(p).strip() for p in (a.get("key_points") or []) if str(p).strip()]
+        if not agenda_items and a.get("title"):
+            agenda_items = [a["title"].strip()]
+
+    # 2) map each body slide to its best agenda item; tag in place
+    mappings, unmatched = [], []
+    used = set()
+    for i, s in enumerate(slides):
+        ty = (s.get("type") or "").lower()
+        if i == agenda_idx or ty in _SKIP_TYPES:
+            continue
+        body = (s.get("title") or "") + " " + " ".join(str(p) for p in (s.get("key_points") or []))
+        best, best_score = None, 0.0
+        for item in agenda_items:
+            sc = _similarity(item, body)
+            if sc > best_score:
+                best, best_score = item, sc
+        if best and best_score >= threshold:
+            # Only inject a section when we are confident — avoids steering a slide toward a
+            # wrong/weak section (which would cause drift rather than fix it).
+            s["_agenda_section"] = best
+            used.add(best)
+            mappings.append({"slide": s.get("slide_number", i + 1), "title": s.get("title", ""),
+                             "agenda_item": best, "score": round(best_score, 3)})
+        else:
+            # no confident match → do NOT inject a section (safe), just flag as unmatched
+            unmatched.append({"slide": s.get("slide_number", i + 1), "title": s.get("title", ""),
+                              "best_item": best, "score": round(best_score, 3)})
+
+    # 3) agenda items with no supporting slide
+    orphans = [it for it in agenda_items if it not in used]
+    # duplicate/drifted: an agenda item claimed by an implausible number of slides, or many unmatched
+    drift = [m["agenda_item"] for m in mappings]
+    dup = sorted({x for x in drift if drift.count(x) > max(2, len(slides) // 3)})
+
+    if not agenda_items:
+        status = "warning"
+    elif unmatched and (len(unmatched) > max(1, len(mappings))):
+        status = "fail"
+    elif unmatched or orphans:
+        status = "warning"
+    else:
+        status = "pass"
+
+    return {
+        "agenda_slide_index": (agenda_idx + 1) if agenda_idx is not None else None,
+        "agenda_items": agenda_items,
+        "slide_mappings": mappings,
+        "unmatched_slides": unmatched,
+        "agenda_items_without_supporting_slides": orphans,
+        "duplicate_or_drifted_topics": dup,
+        "overall_status": status,
+    }
+
+
 def _write_selected_template(job_id: int, template: dict, payload: dict, pages: int):
     """Persist selected_template.json so outline / slide / render reference one source."""
     tid = template["id"]
@@ -688,6 +777,14 @@ def poc_generate(payload: dict = Body(...)):
     _write_report(job_id, "outline_quality_report.json", gate)
     frag = _slot_fragmentation_report(pages, cards)
     _write_report(job_id, "slot_fragmentation_report.json", frag)
+    # Agenda-to-slides consistency: tags outline["slides"] in place with `_agenda_section`
+    # (used for per-slide prompt injection) and persists a report.
+    agenda = _agenda_consistency(outline.get("slides", []))
+    _write_report(job_id, "agenda_consistency_report.json", agenda)
+    if agenda["overall_status"] != "pass":
+        logger.warning(f"Job {job_id}: agenda consistency = {agenda['overall_status']}; "
+                       f"unmatched={[u['slide'] for u in agenda['unmatched_slides']]} "
+                       f"orphan_items={agenda['agenda_items_without_supporting_slides']}")
     if gate["warnings"]:
         logger.warning(f"Job {job_id}: outline quality warnings: {gate['warnings']}")
     if frag["flagged_pages"]:
