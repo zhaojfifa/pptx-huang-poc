@@ -361,7 +361,8 @@ def _compose_requirements(payload: dict) -> str:
 
 
 def _outline_to_cards(outline: dict) -> list:
-    """Kimi outline {slides:[...]} → editable frontend cards (carry type/page map)."""
+    """Kimi outline {slides:[...]} → editable frontend cards (carry type/page map +
+    agenda section binding section_id/section_title/slide_role_under_section)."""
     cards = []
     for s in outline.get("slides", []):
         cards.append({
@@ -371,6 +372,9 @@ def _outline_to_cards(outline: dict) -> list:
             "type": s.get("type") or "content",
             "title": s.get("title", ""),
             "points": list(s.get("key_points", []) or []),
+            "section_id": s.get("section_id"),
+            "section_title": s.get("section_title"),
+            "slide_role_under_section": s.get("slide_role_under_section"),
         })
     return cards
 
@@ -386,6 +390,9 @@ def _cards_to_slides(cards: list, template_key: str = None) -> dict:
             "type": c.get("type", "content"),
             "title": c.get("title", ""),
             "key_points": list(c.get("points", []) or []),
+            "section_id": c.get("section_id"),
+            "section_title": c.get("section_title"),
+            "slide_role_under_section": c.get("slide_role_under_section"),
             "_total_pages": total,
             "_template_key": template_key,
             "notes": "",
@@ -424,20 +431,50 @@ def _agenda_consistency(slides: list, threshold: float = 0.12) -> dict:
     if agenda_idx is None and len(slides) >= 2:
         agenda_idx = 1  # conventional 2nd slide fallback
 
-    agenda_items = []
-    if agenda_idx is not None:
-        a = slides[agenda_idx]
-        agenda_items = [str(p).strip() for p in (a.get("key_points") or []) if str(p).strip()]
-        if not agenda_items and a.get("title"):
-            agenda_items = [a["title"].strip()]
+    # Does the outline carry explicit section binding (PR-Q2D)? Prefer it over similarity.
+    explicit = any((s.get("section_title") or s.get("section_id")) for s in slides)
+    mapping_method = "section_id" if explicit else "similarity"
 
-    # 2) map each body slide to its best agenda item; tag in place
+    # Build the authoritative agenda items.
+    if explicit:
+        # ordered distinct section_titles (by section_id when available, else first-seen)
+        seen_order, sec_by_id = [], {}
+        for s in slides:
+            st = (s.get("section_title") or "").strip()
+            if st and st not in seen_order:
+                seen_order.append(st)
+                if s.get("section_id"):
+                    sec_by_id[st] = str(s.get("section_id"))
+        agenda_items = sorted(seen_order, key=lambda t: sec_by_id.get(t, "zz")) if sec_by_id else seen_order
+    else:
+        agenda_items = []
+        if agenda_idx is not None:
+            a = slides[agenda_idx]
+            agenda_items = [str(p).strip() for p in (a.get("key_points") or []) if str(p).strip()]
+            if not agenda_items and a.get("title"):
+                agenda_items = [a["title"].strip()]
+
+    # 2) map each body slide to its agenda section; tag in place
     mappings, unmatched = [], []
     used = set()
     for i, s in enumerate(slides):
         ty = (s.get("type") or "").lower()
         if i == agenda_idx or ty in _SKIP_TYPES:
             continue
+        slide_no = s.get("slide_number", i + 1)
+        if explicit:
+            st = (s.get("section_title") or "").strip()
+            if st and st in agenda_items:
+                s["_agenda_section"] = st
+                used.add(st)
+                mappings.append({"slide": slide_no, "title": s.get("title", ""),
+                                 "agenda_item": st, "section_id": s.get("section_id"),
+                                 "method": "section_id"})
+            else:
+                unmatched.append({"slide": slide_no, "title": s.get("title", ""),
+                                  "best_item": st or None, "method": "section_id"})
+            continue
+        # similarity fallback (outlines without explicit binding)
         body = (s.get("title") or "") + " " + " ".join(str(p) for p in (s.get("key_points") or []))
         best, best_score = None, 0.0
         for item in agenda_items:
@@ -445,16 +482,13 @@ def _agenda_consistency(slides: list, threshold: float = 0.12) -> dict:
             if sc > best_score:
                 best, best_score = item, sc
         if best and best_score >= threshold:
-            # Only inject a section when we are confident — avoids steering a slide toward a
-            # wrong/weak section (which would cause drift rather than fix it).
             s["_agenda_section"] = best
             used.add(best)
-            mappings.append({"slide": s.get("slide_number", i + 1), "title": s.get("title", ""),
-                             "agenda_item": best, "score": round(best_score, 3)})
+            mappings.append({"slide": slide_no, "title": s.get("title", ""),
+                             "agenda_item": best, "score": round(best_score, 3), "method": "similarity"})
         else:
-            # no confident match → do NOT inject a section (safe), just flag as unmatched
-            unmatched.append({"slide": s.get("slide_number", i + 1), "title": s.get("title", ""),
-                              "best_item": best, "score": round(best_score, 3)})
+            unmatched.append({"slide": slide_no, "title": s.get("title", ""),
+                              "best_item": best, "score": round(best_score, 3), "method": "similarity"})
 
     # 3) agenda items with no supporting slide
     orphans = [it for it in agenda_items if it not in used]
@@ -472,8 +506,10 @@ def _agenda_consistency(slides: list, threshold: float = 0.12) -> dict:
         status = "pass"
 
     return {
+        "mapping_method": mapping_method,
         "agenda_slide_index": (agenda_idx + 1) if agenda_idx is not None else None,
         "agenda_items": agenda_items,
+        "agenda_items_count": len(agenda_items),
         "slide_mappings": mappings,
         "unmatched_slides": unmatched,
         "agenda_items_without_supporting_slides": orphans,

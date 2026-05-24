@@ -228,9 +228,30 @@ CRITICAL RULES:
 6. Label/caption slots are small text boxes in diagrams/charts. Their specific text will be generated later, but you should be aware of their existence and quantity when planning the slide structure.
 7. Do NOT generate more or fewer key_points than the template page has content slots.
 
+=== AGENDA STRUCTURE (REQUIRED — top-down 总分关系) ===
+8. Produce a top-level "agenda" array of 3–6 sections that is the 总纲 of the whole deck.
+   Each section = {{"section_id": "A"/"B"/"C"...", "section_title": "<并列、业务化的章节名, 6-14字>"}}.
+   - Section titles MUST be parallel in wording and business-meaningful (e.g.
+     「经营质效与财务表现」「产能效率与智能制造」「风险挑战与应对」「下一步战略重点」).
+   - FORBIDDEN: metric cards as sections (e.g. 「营收3,612亿」), vague single buckets
+     (e.g. only 「六大板块」), conclusions, or random page summaries.
+   - Sections must collectively cover the body slides; each section covers ≥1 body slide.
+9. The agenda/目录 slide (the section/agenda-type page, usually slide 2) MUST display these
+   sections: set its key_points to the section_titles (a real table of contents), NOT KPIs
+   or metrics.
+10. Every body slide (NOT cover/title, NOT the agenda slide, NOT ending) MUST be bound to one
+    agenda section and include:
+    - "section_id": the owning section's id
+    - "section_title": the owning section's title (copied verbatim)
+    - "slide_role_under_section": one sentence on how this page supports that section.
+    A slide's topic MUST stay within its section — do not introduce unrelated themes.
+
 Return JSON:
 {{
     "title": "<presentation title>",
+    "agenda": [
+        {{"section_id": "A", "section_title": "<并列业务化章节名>"}}
+    ],
     "slides": [
         {{
             "slide_number": 1,
@@ -238,6 +259,9 @@ Return JSON:
             "type": "<title|content|section|chart|ending>",
             "title": "<slide title, under 15 Chinese chars>",
             "key_points": ["<point 1>", "<point 2>"],
+            "section_id": "<A/B/C... ; omit for cover/agenda/ending>",
+            "section_title": "<owning section title ; omit for cover/agenda/ending>",
+            "slide_role_under_section": "<how this page supports the section ; omit for cover/agenda/ending>",
             "notes": "<which template page this slide maps to and why>"
         }}
     ]
@@ -286,13 +310,19 @@ Return JSON:
 
         # Agenda-to-slides consistency injection (top-down): keep this slide as a supporting
         # detail under its assigned agenda section; do not drift to unrelated themes.
-        _agenda_section = (slide_outline.get("_agenda_section") or "").strip()
+        _agenda_section = (slide_outline.get("_agenda_section")
+                           or slide_outline.get("section_title") or "").strip()
+        _slide_role = (slide_outline.get("slide_role_under_section") or "").strip()
         if _agenda_section and _ptype not in ("cover", "agenda", "closing"):
             page_type_block += (
                 f"\n=== 目录归属（必须遵守）===\n"
                 f"本页隶属目录章节：「{_agenda_section}」。"
-                f"请将本页内容作为该章节的分论展开/支撑细节来生成，"
-                f"紧扣该章节主题，禁止引入与该章节无关的其它主题。"
+            )
+            if _slide_role:
+                page_type_block += f"本页在该章节中的作用：{_slide_role}。"
+            page_type_block += (
+                "请将本页内容作为该章节的分论展开/支撑细节来生成，"
+                "紧扣该章节主题，禁止引入与该章节无关的其它主题。"
             )
 
         # Build row-aware slot specifications
