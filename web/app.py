@@ -760,6 +760,21 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
         _GEN_STATUS[job_id]["step"] = "render"
         agent.step_render_preview(job_id, layouts)
         final_path = agent.step_generate_final(job_id, layouts)
+        # Native chart rebind (PR-Q2E) — T6/tech_blue P7 only. Updates embedded-workbook
+        # native charts in place (style/axes/legend/colors/position preserved); external-link
+        # charts are skipped. T5 has no native charts → not reached (name gate + no-op anyway).
+        chart_rebind = None
+        if (template or {}).get("name") == "科技蓝风格":
+            from core.native_chart_rebind import rebind_native_charts
+            chart_rebind = rebind_native_charts(
+                final_path,
+                categories=["Q1", "Q2", "Q3", "Q4"],
+                series=[("营业收入", (728.8, 784.9, 810.6, 850.7)),
+                        ("归母净利润", (24.3, 24.5, 30.8, 23.9))],
+                only_slide_numbers=[7],
+            )
+            _write_report(job_id, "native_chart_rebind_report.json", chart_rebind)
+            logger.info(f"Job {job_id}: native chart rebind P7 → {chart_rebind}")
         # Final PPTX hygiene scan (advisory; does not block this PR).
         contamination = _final_contamination_scan(final_path)
         _write_report(job_id, "final_contamination_report.json", contamination)
@@ -767,7 +782,8 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
             logger.warning(f"Job {job_id}: contamination scan hits: {contamination.get('hit_terms')}")
         _GEN_STATUS[job_id] = {"state": "done", "final_path": final_path,
                                "contamination_clean": contamination.get("clean"),
-                               "contamination_hits": contamination.get("hit_terms", {})}
+                               "contamination_hits": contamination.get("hit_terms", {}),
+                               "chart_rebind": chart_rebind}
     except Exception as e:
         logger.error(f"Generation failed for job {job_id}: {e}")
         _GEN_STATUS[job_id] = {"state": "failed", "error": str(e)}
