@@ -13,7 +13,7 @@ Two passes:
 import logging
 import re
 
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Pt
 
 logger = logging.getLogger(__name__)
@@ -94,9 +94,37 @@ def normalize_table_typography(prs, log) -> None:
                             for p in r.cells[ci].text_frame.paragraphs:
                                 p.alignment = PP_ALIGN.CENTER
 
+            # A3: center the header row (horizontal + vertical). Safe — alignment only.
+            for c in rows[0].cells:
+                for p in c.text_frame.paragraphs:
+                    p.alignment = PP_ALIGN.CENTER
+                try:
+                    c.vertical_anchor = MSO_ANCHOR.MIDDLE
+                except Exception:
+                    pass
+
+            # A4: center the first column when it is a category/index/key column
+            # (body cells mostly short, non-numeric labels — not a numeric data column).
+            first_col_centered = False
+            if ncols >= 2 and 0 not in numeric_cols:
+                vals = [rows[r].cells[0].text.strip() for r in range(1, len(rows)) if rows[r].cells]
+                vals = [v for v in vals if v]
+                short_labels = vals and all(len(v) <= 12 for v in vals)
+                if short_labels:
+                    for r in rows[1:]:
+                        if r.cells:
+                            for p in r.cells[0].text_frame.paragraphs:
+                                p.alignment = PP_ALIGN.CENTER
+                            try:
+                                r.cells[0].vertical_anchor = MSO_ANCHOR.MIDDLE
+                            except Exception:
+                                pass
+                    first_col_centered = True
+
             log["tables"].append({
                 "slide": sidx, "shape": sh.name, "rows": len(rows), "cols": ncols,
-                "header_min_pt": header_min, "header_align": header_align,
+                "header_min_pt": header_min, "header_align_before": header_align,
+                "header_centered": True, "first_col_centered": first_col_centered,
                 "body_runs_capped": capped, "numeric_cols_centered": numeric_cols,
             })
 
