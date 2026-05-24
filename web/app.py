@@ -1016,10 +1016,21 @@ def _build_template_index(template_name: str) -> list:
     pages = TemplatePageDAO.get_by_template(tpl["id"])
     total = len(pages)
     idx = []
+    def _as_dict(v):
+        # TemplatePageDAO.get_by_template already json-decodes these columns to dict;
+        # tolerate either decoded dict or raw JSON string.
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str) and v:
+            try:
+                return json.loads(v)
+            except (ValueError, TypeError):
+                return {}
+        return {}
     for p in pages:
-        lj = json.loads(p["layout_json"]) if p.get("layout_json") else {}
+        lj = _as_dict(p.get("layout_json"))
         bp = TemplateStyleEngine({"layout_json": lj,
-                                  "visual_json": json.loads(p.get("visual_json") or "{}")}).blueprint
+                                  "visual_json": _as_dict(p.get("visual_json"))}).blueprint
         slots = bp.get("slots", {})
         shapes = lj.get("shapes", [])
         tables = sum(1 for s in shapes if "table" in s)
