@@ -213,6 +213,37 @@ class TemplatePageDAO:
         conn.close()
         return rows
 
+    @staticmethod
+    def update_by_template_page(template_id: int, page_number: int, **kwargs) -> int:
+        """Update a single (template_id, page_number) row in place (PR-Q3b).
+
+        Only whitelisted columns are updatable; dict-valued JSON columns are
+        serialized. Returns the affected row count (0 if the page does not exist).
+        Used by the /custom page_type save and (future Q3c) single-page reanalysis.
+        """
+        allowed = ["markdown_content", "layout_json", "visual_json", "generation_hints", "page_type"]
+        json_cols = {"layout_json", "visual_json", "generation_hints"}
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            if k not in allowed:
+                continue
+            sets.append(f"{k} = %s")
+            vals.append(json.dumps(v, ensure_ascii=False) if (k in json_cols and v is not None) else v)
+        if not sets:
+            return 0
+        vals.extend([template_id, page_number])
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE template_pages SET {', '.join(sets)} WHERE template_id = %s AND page_number = %s",
+            tuple(vals),
+        )
+        conn.commit()
+        affected = cursor.rowcount
+        cursor.close()
+        conn.close()
+        return affected
+
 
 class GenerationJobDAO:
     @staticmethod

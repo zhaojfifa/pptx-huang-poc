@@ -242,28 +242,48 @@ class TemplateCloner:
         if total_template == 0:
             raise RuntimeError(f"Template has no slides: {template_path}")
 
-        # Pre-duplicate all needed slides first (before any filling)
-        needed_slides = []
-        for i, _ in enumerate(slides_data):
-            template_idx = i % total_template
-            if i < total_template:
-                needed_slides.append(template_slides[template_idx])
+        # PR-Q3b: pick each slide's source template slide by its 1-based
+        # `_template_page_number` when present, else positionally. For the normal
+        # 12-page deck every slide_data[i] carries template_page_number i+1, so
+        # target_idx[i] == i and behavior is identical to before.
+        target_idx = []
+        for i, sd in enumerate(slides_data):
+            tpn = sd.get("_template_page_number") if isinstance(sd, dict) else None
+            if isinstance(tpn, int) and 1 <= tpn <= total_template:
+                target_idx.append(tpn - 1)
             else:
-                source_slide = template_slides[template_idx]
-                new_slide = self._duplicate_slide(prs, source_slide)
-                needed_slides.append(new_slide)
+                target_idx.append(i % total_template)
+
+        # Pre-duplicate needed slides first (before any filling). A template slide
+        # reused by more than one slide_data is duplicated; first use reuses it.
+        needed_slides = []
+        used_once = set()
+        for i, ti in enumerate(target_idx):
+            if ti not in used_once:
+                needed_slides.append(template_slides[ti])
+                used_once.add(ti)
+            else:
+                needed_slides.append(self._duplicate_slide(prs, template_slides[ti]))
 
         filled = 0
         for i, slide_data in enumerate(slides_data):
-            template_idx = i % total_template
-            slide = needed_slides[i]
-
-            blueprint = None
-            if blueprints and template_idx < len(blueprints):
-                blueprint = blueprints[template_idx]
-
-            self._fill_slide(slide, slide_data, blueprint)
+            # blueprints are built per slide_data (aligned by i) in step_normalize_layouts,
+            # so index by i — matches the chosen template page for this slide.
+            blueprint = blueprints[i] if (blueprints and i < len(blueprints)) else None
+            self._fill_slide(needed_slides[i], slide_data, blueprint)
             filled += 1
+
+        # PR-Q3b: drop template slides that no slide_data targeted (e.g. an 8-page
+        # deck taken from a 12-page master). Only when no duplication happened, so the
+        # kept slides stay in their original order; 12-page decks keep all slides.
+        if len(used_once) == len(slides_data) and len(used_once) < total_template:
+            keep = {id(s.element) for s in needed_slides}
+            sld_id_lst = prs.slides._sldIdLst
+            for slide, entry in zip(template_slides, list(sld_id_lst)):
+                if id(slide.element) not in keep:
+                    sld_id_lst.remove(entry)
+            logger.info(f"Template cloned: dropped {total_template - len(used_once)} unused master slides "
+                        f"(kept {len(used_once)} of {total_template}).")
 
         prs.save(output_path)
         logger.info(f"Template cloned: {filled} slides filled from {template_path}")

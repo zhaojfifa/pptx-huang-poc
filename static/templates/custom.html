@@ -22,6 +22,13 @@
   .pg img{width:100%;display:block;background:#eef1f6;aspect-ratio:16/9;object-fit:cover}
   .pg .meta{padding:10px 12px;font-size:12px;color:#41506b} .pg .meta b{color:#0b3d91}
   .pg .warn{color:#b3261e;font-size:11.5px;margin-top:4px}
+  .pg .pv{color:#6b7a92;font-size:11px;margin-top:4px;line-height:1.45}
+  .pg .srcbadge{font-size:10px;background:#eef2fb;color:#6b7a92;border-radius:6px;padding:1px 6px}
+  .pg .ptrow{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px}
+  .pg .ptrow select{flex:1;min-width:78px;padding:5px 6px;font-size:12px;border:1px solid #d7dde8;border-radius:7px}
+  .pg .mini{font-size:11px;padding:5px 8px;border:none;border-radius:7px;background:#0b3d91;color:#fff;cursor:pointer}
+  .pg .mini.ghost{background:#fff;color:#0b3d91;border:1px solid #c9d6ec}
+  .pg .ptmsg{font-size:11.5px;margin-top:5px;min-height:14px}
   .spin{display:inline-block;width:15px;height:15px;border:2.5px solid rgba(255,255,255,.5);border-top-color:#fff;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:7px}
   .spin.dk{border-color:#cdd9f0;border-top-color:#0b3d91} @keyframes sp{to{transform:rotate(360deg)}}
   .hide{display:none!important}
@@ -107,13 +114,50 @@ async function pollAnalyze(){
   box.innerHTML='<span class="spin dk"></span>正在解析母版（'+(s.step||'分析中')+'）… 母版较复杂时需要数分钟。';
   setTimeout(pollAnalyze, 5000);
 }
+const PT_LABELS={cover:'封面',agenda:'目录',content:'正文',table:'表格',chart:'图表',closing:'结束'};
+function escc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
 function renderIndex(idx){
   const g=document.getElementById('index-grid'); g.innerHTML='';
   idx.forEach(p=>{
-    const w=(p.warnings||[]).map(x=>`<div class="warn">⚠ ${x}</div>`).join('');
+    const w=(p.warnings||[]).map(x=>`<div class="warn">⚠ ${escc(x)}</div>`).join('');
+    const opts=(p.page_type_options||['cover','agenda','content','table','chart','closing'])
+      .map(o=>`<option value="${o}"${o===p.page_type_raw?' selected':''}>${PT_LABELS[o]||o}</option>`).join('');
+    const src=p.page_type_persisted?'已保存':'自动判定';
+    const mdp=p.md_preview?`<div class="pv">摘要：${escc(p.md_preview)}</div>`:'';
+    const hint=p.hints_summary?`<div class="pv">提示：${escc(p.hints_summary)}</div>`:'';
     g.innerHTML+=`<div class="pg"><img src="${p.thumbnail}" loading="lazy" onerror="this.style.opacity=.3">
-      <div class="meta">第 ${p.page} 页 · <b>${p.page_type}</b><br>可填区:${p.content_slots} 标签:${p.label_slots} 表:${p.tables} 图:${p.pictures}${w}</div></div>`;
+      <div class="meta">第 ${p.page} 页 · <b>${escc(p.page_type)}</b> <span class="srcbadge">${src}</span><br>
+      可填区:${p.content_slots} 标签:${p.label_slots} 表:${p.tables} 图:${p.pictures}${mdp}${hint}${w}
+      <div class="ptrow">
+        <select id="pt-${p.template_id}-${p.page}">${opts}</select>
+        <button class="mini" onclick="savePageType(${p.template_id},${p.page})">保存类型</button>
+        <button class="mini ghost" onclick="reanalyzePage(${p.template_id},${p.page})">重新分析本页</button>
+      </div>
+      <div class="ptmsg" id="ptmsg-${p.template_id}-${p.page}"></div>
+      </div></div>`;
   });
+}
+async function savePageType(tid,page){
+  const sel=document.getElementById(`pt-${tid}-${page}`);
+  const msg=document.getElementById(`ptmsg-${tid}-${page}`);
+  msg.textContent='保存中…'; msg.style.color='#6b7a92';
+  try{
+    const r=await fetch('/api/custom-template/page-type',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({template_id:tid,page_number:page,page_type:sel.value})});
+    const d=await r.json();
+    if(r.ok&&d.status==='ok'){ msg.textContent='✓ 已保存：'+(PT_LABELS[d.page_type]||d.page_type); msg.style.color='#1d9b54'; }
+    else { msg.textContent='保存失败：'+(d.message||''); msg.style.color='#b3261e'; }
+  }catch(e){ msg.textContent='保存失败：'+e; msg.style.color='#b3261e'; }
+}
+async function reanalyzePage(tid,page){
+  const msg=document.getElementById(`ptmsg-${tid}-${page}`);
+  msg.textContent='请求中…'; msg.style.color='#6b7a92';
+  try{
+    const r=await fetch('/api/custom-template/reanalyze-page',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({template_id:tid,page_number:page})});
+    const d=await r.json();
+    msg.textContent=(d.status==='not_implemented'?'ⓘ ':'')+(d.message||'已请求'); msg.style.color='#8a5a00';
+  }catch(e){ msg.textContent='请求失败：'+e; msg.style.color='#b3261e'; }
 }
 function showGen(){
   document.getElementById('c-gen').classList.remove('hide');

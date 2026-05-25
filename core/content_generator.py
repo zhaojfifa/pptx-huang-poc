@@ -160,16 +160,28 @@ class ContentGenerator:
         template_info: dict,
         template_pages: list,
         job_id: int = None,
+        page_numbers: list = None,
     ) -> dict:
         system = "You are a PPT content strategist. Create a detailed PPT outline. Output JSON only."
 
         template_style = template_info.get("overall_style", {}) if isinstance(template_info, dict) else {}
-        page_count_hint = len(template_pages) if template_pages else 8
 
-        # Build per-page slot specifications for ALL template pages
+        # PR-Q3b: optional page subset for a shorter deck (e.g. 8-page quick mode).
+        # `page_numbers` is the ordered list of 1-based master page numbers to use
+        # (cover/agenda/body/closing). When omitted, every master page is used in order
+        # so the normal full-length deck is unchanged.
+        by_num = {(tp.get("page_number") or (i + 1)): tp for i, tp in enumerate(template_pages)}
+        if page_numbers:
+            selected = [(pn, by_num[pn]) for pn in page_numbers if pn in by_num]
+        else:
+            selected = [((tp.get("page_number") or (i + 1)), tp) for i, tp in enumerate(template_pages)]
+        page_count_hint = len(selected) if selected else 8
+
+        # Build per-page slot specifications for the selected template pages
         from core.template_style_engine import TemplateStyleEngine
         page_specs = []
-        for i, tp in enumerate(template_pages):
+        for _slide_pos, (_pn, tp) in enumerate(selected, start=1):
+            i = _pn - 1
             engine = TemplateStyleEngine(tp)
             bp = engine.blueprint
             slots = bp["slots"]
@@ -181,7 +193,7 @@ class ContentGenerator:
             avg_label_cap = int(sum(label_capacities) / len(label_capacities)) if label_capacities else 20
 
             tables = slots.get("tables", [])
-            spec_lines = [f"Template Page {i+1} layout:"]
+            spec_lines = [f"Deck slide {_slide_pos} → Template Page {_pn} (set template_page_number={_pn}):"]
             if slots.get("title"):
                 spec_lines.append("  - 1 title slot (slide heading)")
             if slots.get("subtitle"):
@@ -233,10 +245,11 @@ Template style to follow:
 {page_specs_text}
 
 CRITICAL RULES:
-1. The template has EXACTLY {page_count_hint} pages. You MUST generate EXACTLY {page_count_hint} slides.
-2. Each slide MUST strictly correspond to its template page in order: slide 1 uses template page 1, slide 2 uses template page 2, etc.
-   - NEVER suggest reusing earlier template pages (e.g., "复用Page 3" is FORBIDDEN).
-   - Each slide's layout and slot count must match its corresponding template page.
+1. You MUST generate EXACTLY {page_count_hint} slides — one per spec block above, in the same order.
+2. Each slide MUST correspond to the template page named in its spec block above
+   ("Deck slide N → Template Page M"); set that slide's "template_page_number" to M.
+   - NEVER suggest reusing other template pages than the one assigned to the slide.
+   - Each slide's layout and slot count must match its assigned template page.
 3. Each slide MUST have exactly the same number of key_points as the template page has CONTENT slots.
    - Example: if template page 4 has 4 content slots, slide 4 MUST have exactly 4 key_points.
    - Example: if template page 6 has 16 content slots, slide 6 MUST have exactly 16 key_points.

@@ -111,6 +111,23 @@ class PPTXAgent:
         logger.info(f"Job {job_id}: outline generated with {len(outline.get('slides', []))} slides.")
         return outline
 
+    @staticmethod
+    def _select_template_page(pages: list, template_page_number, idx: int) -> dict:
+        """Pick the template page for a slide (PR-Q3b).
+
+        Prefers the outline's 1-based ``template_page_number`` (so a slide can map to
+        a non-positional master page, e.g. an 8-page deck's last slide → the 12-page
+        master's closing page). Falls back to positional selection when absent/invalid,
+        which makes the normal 12-page path byte-for-byte identical to before.
+        """
+        if not pages:
+            return {}
+        if isinstance(template_page_number, int) and template_page_number >= 1:
+            for p in pages:
+                if p.get("page_number") == template_page_number:
+                    return p
+        return pages[idx] if idx < len(pages) else pages[-1]
+
     def step_generate_content_and_layout(self, job_id: int, outline: dict, document_markdown: str, template: dict) -> list:
         pages = TemplatePageDAO.get_by_template(template["id"])
         slides_data = []
@@ -126,10 +143,14 @@ class PPTXAgent:
         for idx, slide_outline in enumerate(all_slides):
             if idx < len(slides_data):
                 continue  # skip already generated slides
-            template_page = pages[idx] if idx < len(pages) else (pages[-1] if pages else {})
+            template_page = self._select_template_page(pages, slide_outline.get("template_page_number"), idx)
             try:
                 pptx_path = template.get("file_path") if template else None
                 slide_data = self.content_generator.generate_slide_content(slide_outline, document_markdown, template_page, job_id=job_id, pptx_path=pptx_path)
+                # PR-Q3b: carry the chosen template page so the layout/render steps
+                # select the SAME template page (e.g. an 8-page deck whose last slide
+                # maps to the 12-page master's closing page).
+                slide_data["_template_page_number"] = slide_outline.get("template_page_number") or (idx + 1)
 
                 # Hard normalization: enforce slot count and capacity limits
                 if template_page:
@@ -175,7 +196,7 @@ class PPTXAgent:
         layouts = []
         blueprints = []
         for i, slide_data in enumerate(slides_data):
-            template_page = template_pages[i] if i < len(template_pages) else (template_pages[-1] if template_pages else {})
+            template_page = self._select_template_page(template_pages, slide_data.get("_template_page_number"), i)
             if template_page:
                 from core.template_style_engine import TemplateLayoutMapper
                 pptx_path = template.get("file_path") if template else None

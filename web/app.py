@@ -360,16 +360,100 @@ def _compose_requirements(payload: dict) -> str:
     return "\n".join(bits)
 
 
+# PR-Q3b: the safe, human-editable page-type vocabulary surfaced in the outline editor.
+_CANON_PAGE_TYPES = ["cover", "agenda", "content", "table", "chart", "closing"]
+# Map the LLM/outline `type` (title/section/ending/...) onto that canonical set.
+_PTYPE_ALIAS = {
+    "title": "cover", "cover": "cover",
+    "agenda": "agenda", "section": "agenda", "toc": "agenda", "catalog": "agenda",
+    "content": "content", "summary": "content", "dense_labels": "content", "text": "content",
+    "table": "table",
+    "chart": "chart",
+    "ending": "closing", "closing": "closing", "thanks": "closing", "end": "closing",
+}
+
+
+def _canon_ptype(t: str, fallback: str = "content") -> str:
+    """Normalize an outline/LLM type string into the canonical editable set."""
+    return _PTYPE_ALIAS.get((t or "").strip().lower(), fallback)
+
+
+def _subset_page_numbers(pages: list, req_pages: int):
+    """PR-Q3b · 8-page quick mode page map. Returns an ordered list of 1-based master
+    page numbers [cover, agenda, body…, closing] of length req_pages, or None to use
+    the full deck. Closing prefers a master page with page_type='closing', else the
+    last page — so a short deck never loses its back/closing page."""
+    total = len(pages)
+    if not pages or req_pages >= total or req_pages < 3:
+        return None
+    nums = sorted((p.get("page_number") or (i + 1)) for i, p in enumerate(pages))
+    closing_pn = next((p.get("page_number") for p in pages
+                       if (p.get("page_type") or "").strip() == "closing"), None) or nums[-1]
+    cover_pn, agenda_pn = nums[0], nums[1]
+    body = [n for n in nums if n not in (cover_pn, agenda_pn, closing_pn)][:req_pages - 3]
+    return [cover_pn, agenda_pn] + body + [closing_pn]
+
+
+def _validate_confirmed_outline(cards: list, template_page_count: int) -> dict:
+    """PR-Q3b Scope B: structural validation of a user-confirmed outline before generation.
+    Hard errors block (clear message, never silent); agenda mismatch is an advisory warning.
+    Type checks accept both canonical and raw equivalents so a normal LLM outline passes."""
+    errors, warnings = [], []
+    if not cards:
+        return {"errors": ["大纲为空，无法生成。"], "warnings": []}
+    n = len(cards)
+    if template_page_count and n > template_page_count:
+        errors.append(f"大纲 {n} 页超过模板可用页数 {template_page_count} 页。")
+
+    def ty(card):
+        return _canon_ptype(card.get("type") or card.get("page_type"))
+    if ty(cards[0]) != "cover":
+        errors.append("第 1 页必须是封面页（cover/title）。")
+    if n >= 2 and ty(cards[1]) != "agenda":
+        errors.append("第 2 页必须是目录/章节页（agenda/section）。")
+    if n >= 3 and ty(cards[-1]) != "closing":
+        errors.append(f"最后一页（第 {n} 页）必须是结束/封底页（closing/ending）。")
+
+    # Agenda items vs body section_titles — structural consistency, advisory only.
+    agenda_items = [str(p).strip() for p in (cards[1].get("points") or []) if str(p).strip()] if n >= 2 else []
+    body_sections = []
+    for c in cards[2:-1] if n >= 3 else []:
+        st = (c.get("section_title") or "").strip()
+        if st and st not in body_sections:
+            body_sections.append(st)
+    orphan_sections = [st for st in body_sections if agenda_items and st not in agenda_items]
+    if orphan_sections:
+        warnings.append("以下正文章节不在目录项中（建议同步目录或章节归属）：" + "、".join(orphan_sections[:6]))
+    return {"errors": errors, "warnings": warnings,
+            "agenda_items": agenda_items, "body_sections": body_sections,
+            "orphan_sections": orphan_sections}
+
+
 def _outline_to_cards(outline: dict) -> list:
     """Kimi outline {slides:[...]} → editable frontend cards (carry type/page map +
-    agenda section binding section_id/section_title/slide_role_under_section)."""
+    agenda section binding section_id/section_title/slide_role_under_section).
+    PR-Q3b: adds a canonical, editable `page_type` alongside the raw `type`."""
     cards = []
-    for s in outline.get("slides", []):
+    slides = outline.get("slides", [])
+    n = len(slides)
+    for i, s in enumerate(slides):
+        raw_type = s.get("type") or "content"
+        # Positional fallback so page 1/2/last get sensible canonical types even if the
+        # LLM omitted them; otherwise normalize the LLM type.
+        if i == 0:
+            ptype = _canon_ptype(raw_type, "cover")
+        elif i == 1:
+            ptype = _canon_ptype(raw_type, "agenda")
+        elif i == n - 1 and n >= 3:
+            ptype = _canon_ptype(raw_type, "closing")
+        else:
+            ptype = _canon_ptype(raw_type, "content")
         cards.append({
-            "page": s.get("slide_number"),
-            "template_page_number": s.get("template_page_number", s.get("slide_number")),
+            "page": s.get("slide_number", i + 1),
+            "template_page_number": s.get("template_page_number", s.get("slide_number", i + 1)),
             "section": s.get("title_section") or s.get("type") or "",
-            "type": s.get("type") or "content",
+            "type": raw_type,
+            "page_type": ptype,
             "title": s.get("title", ""),
             "points": list(s.get("key_points", []) or []),
             "section_id": s.get("section_id"),
@@ -387,7 +471,8 @@ def _cards_to_slides(cards: list, template_key: str = None) -> dict:
         slides.append({
             "slide_number": c.get("page", i),
             "template_page_number": c.get("template_page_number", c.get("page", i)),
-            "type": c.get("type", "content"),
+            # PR-Q3b: honor the user-edited canonical page_type; fall back to raw type.
+            "type": c.get("page_type") or c.get("type", "content"),
             "title": c.get("title", ""),
             "key_points": list(c.get("points", []) or []),
             "section_id": c.get("section_id"),
@@ -553,8 +638,11 @@ def _mock_outline_cards(payload: dict) -> list:
     prompt = (payload.get("prompt") or "").strip()
     t = (prompt[:18] + "…") if len(prompt) > 18 else (prompt or "企业年度经营汇报")
     cards = []
+    n = len(base)
     for i, (sec, ty, title, pts) in enumerate(base, start=1):
+        fb = "cover" if i == 1 else ("agenda" if i == 2 else ("closing" if i == n else "content"))
         cards.append({"page": i, "template_page_number": i, "section": sec, "type": ty,
+                      "page_type": _canon_ptype(ty, fb),
                       "title": title.replace("{t}", t), "points": pts})
     return cards
 
@@ -728,25 +816,38 @@ def poc_outline(payload: dict = Body(...)):
         if doc_md:
             agent._save_checkpoint(job_id, "document_markdown.md", doc_md)
         _write_selected_template(job_id, template, payload, len(pages))
+        # PR-Q3b: 8-page (or any shorter) quick mode — map to a cover/agenda/body/closing
+        # subset of the master pages so the deck keeps its closing page. None = full deck.
+        page_numbers = _subset_page_numbers(pages, req_pages)
+        if page_numbers:
+            logger.info(f"Job {job_id}: quick mode {req_pages}p → master page map {page_numbers}")
         try:
             outline = agent.content_generator.generate_outline(
-                requirements, doc_md, template, pages, job_id=job_id)
+                requirements, doc_md, template, pages, job_id=job_id, page_numbers=page_numbers)
             cards = _outline_to_cards(outline)
             if cards:
                 gate = _outline_quality_gate(cards, doc_md, req_pages, len(pages))
                 _write_report(job_id, "outline_quality_report.json", gate)
                 if gate["warnings"]:
                     logger.warning(f"Job {job_id}: outline quality warnings: {gate['warnings']}")
+                vinfo = _validate_confirmed_outline(cards, len(pages))
                 return {"status": "ok", "source": "kimi", "job_id": job_id,
                         "template_name": template["name"], "page_count": len(cards),
-                        "outline": cards, "quality_warnings": gate["warnings"]}
+                        "outline": cards, "quality_warnings": gate["warnings"],
+                        "page_type_options": _CANON_PAGE_TYPES,
+                        "agenda_items": vinfo["agenda_items"],
+                        "structure_warnings": vinfo["warnings"]}
         except Exception as e:
             logger.error(f"Kimi outline failed, using fallback: {e}")
 
     cards = _mock_outline_cards(payload)
+    vinfo = _validate_confirmed_outline(cards, 0)
     return {"status": "ok", "source": "fallback", "job_id": None,
             "template_name": payload.get("template_name"),
-            "page_count": len(cards), "outline": cards}
+            "page_count": len(cards), "outline": cards,
+            "page_type_options": _CANON_PAGE_TYPES,
+            "agenda_items": vinfo["agenda_items"],
+            "structure_warnings": vinfo["warnings"]}
 
 
 def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
@@ -823,6 +924,14 @@ def poc_generate(payload: dict = Body(...)):
                 "message": f"该模板风格为 {len(pages)} 页，请将大纲控制在 {len(pages)} 页以内。",
                 "template_pages": len(pages)}
 
+    # PR-Q3b Scope B: structural validation of the confirmed outline (clear errors, no
+    # silent fail). Cover/agenda/closing position + page-count; agenda mismatch is advisory.
+    vinfo = _validate_confirmed_outline(cards, len(pages))
+    if vinfo["errors"]:
+        return {"status": "error", "code": "outline_structure_invalid",
+                "message": "；".join(vinfo["errors"]), "errors": vinfo["errors"],
+                "structure_warnings": vinfo["warnings"]}
+
     requirements = _compose_requirements(payload)
     job_id = agent.start_job(requirements, [])
     outline = _cards_to_slides(cards, payload.get("template_key"))   # confirmed outline, verbatim
@@ -872,6 +981,7 @@ def poc_generate(payload: dict = Body(...)):
             "template_name": payload.get("template_name"), "outline_pages": len(cards),
             "ready": ready, "message": msg,
             "quality_warnings": gate["warnings"],
+            "structure_warnings": vinfo["warnings"],
             "slot_fragmentation_flagged": frag["flagged_pages"]}
 
 
@@ -1047,14 +1157,31 @@ def _build_template_index(template_name: str) -> list:
             warns.append("含旧模板用词，建议清洗：" + "、".join(hit[:4]))
         if not slots.get("content") and not slots.get("labels") and not tables:
             warns.append("未检测到可填充区域")
+        # PR-Q3b: short markdown + generation_hints previews for the calibration UI.
+        md_preview = " ".join(md.split())[:90]
+        hints = _as_dict(p.get("generation_hints"))
+        hints_summary = ""
+        if hints:
+            for k in ("page_intent", "page_role", "intent", "summary", "content_guidance", "recommended_use"):
+                if hints.get(k):
+                    hints_summary = str(hints[k])[:90]
+                    break
+            if not hints_summary:
+                hints_summary = "、".join(str(k) for k in list(hints.keys())[:5])
         idx.append({
+            "template_id": tpl["id"],
             "page": p["page_number"],
             "thumbnail": f"/api/custom-template/thumbnail/{tpl['id']}/{p['page_number']}",
             "page_type": ptp.describe(ptype),
+            "page_type_raw": ptype,                 # canonical value for the editable <select>
+            "page_type_persisted": bool(_persisted),  # False ⇒ shown value is runtime-classified
+            "page_type_options": _CANON_PAGE_TYPES,
             "content_slots": len(slots.get("content", [])),
             "label_slots": len(slots.get("labels", [])),
             "tables": tables, "pictures": pics, "groups": groups,
             "recommended_use": ptp.describe(ptype),
+            "md_preview": md_preview,
+            "hints_summary": hints_summary,
             "warnings": warns,
         })
     return idx
@@ -1066,6 +1193,40 @@ def custom_thumbnail(tid: int, n: int):
     if not p.exists():
         return JSONResponse({"error": "no thumbnail"}, status_code=404)
     return FileResponse(str(p))
+
+
+@app.post("/api/custom-template/page-type")
+def custom_set_page_type(payload: dict = Body(...)):
+    """PR-Q3b Scope D: persist a human-calibrated page_type for one template page.
+    Updates only the (template_id, page_number) row; never re-analyzes or rebuilds."""
+    from database.db import TemplatePageDAO
+    template_id = payload.get("template_id")
+    page_number = payload.get("page_number")
+    page_type = (payload.get("page_type") or "").strip().lower()
+    if not template_id or not page_number:
+        return JSONResponse({"status": "error", "message": "缺少 template_id 或 page_number。"}, status_code=400)
+    if page_type not in _CANON_PAGE_TYPES:
+        return JSONResponse({"status": "error",
+                             "message": f"page_type 必须是 {_CANON_PAGE_TYPES} 之一。"}, status_code=400)
+    affected = TemplatePageDAO.update_by_template_page(int(template_id), int(page_number), page_type=page_type)
+    if not affected:
+        return JSONResponse({"status": "error",
+                             "message": f"未找到模板 {template_id} 第 {page_number} 页。"}, status_code=404)
+    logger.info(f"page_type saved: template {template_id} page {page_number} → {page_type}")
+    return {"status": "ok", "template_id": int(template_id), "page_number": int(page_number),
+            "page_type": page_type}
+
+
+@app.post("/api/custom-template/reanalyze-page")
+def custom_reanalyze_page(payload: dict = Body(...)):
+    """PR-Q3b Scope D/E: single-page re-analysis. Deferred to PR-Q3c — returns an
+    explicit not-implemented response (never a fake success), so the UI can show it."""
+    return JSONResponse(
+        {"status": "not_implemented",
+         "code": "single_page_reanalysis_deferred",
+         "message": "单页重新分析将在 PR-Q3c 提供。当前可手动校准 page_type，或对整模板重新分析。",
+         "template_id": payload.get("template_id"), "page_number": payload.get("page_number")},
+        status_code=501)
 
 
 @app.post("/api/custom-template/outline")

@@ -66,6 +66,28 @@
         .ocard input.title:focus { border-color:#c9d6ec; background:#fff; outline:none; }
         .ocard textarea.pts { min-height:64px; font-size:13px; border:1px solid #e3e9f3; background:#fff; margin-top:4px; }
         .notice { background:#eef4ff; color:#2c4a86; border-radius:10px; padding:12px 14px; font-size:13px; margin-top:14px; }
+        /* outline editor (Q3b) */
+        .ocard.cover { border-left:4px solid #0b3d91; }
+        .ocard.agenda { border-left:4px solid #7a3df2; }
+        .ocard.closing { border-left:4px solid #1d9b54; }
+        .ocard .role-tag { font-size:11px; font-weight:700; padding:2px 8px; border-radius:8px; background:#eef2fb; color:#41506b; }
+        .ocard .role-tag.cover { background:#e7eeff; color:#0b3d91; }
+        .ocard .role-tag.agenda { background:#f0e9ff; color:#7a3df2; }
+        .ocard .role-tag.closing { background:#e6f6ec; color:#1d9b54; }
+        .ocard .meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+        .ocard .meta .tpn { font-size:11px; color:#9aa7bd; }
+        .ocard select.ptype { font-size:12px; padding:4px 8px; border:1px solid #d7dde8; border-radius:7px; background:#fff; }
+        .ocard .fld { font-size:12px; color:#6b7a92; margin:8px 0 3px; font-weight:600; }
+        .ocard input.sec-in, .ocard input.role-in { width:100%; padding:7px 9px; border:1px solid #e3e9f3; border-radius:7px; font-size:13px; background:#fff; }
+        .ocard .aglist { display:flex; flex-direction:column; gap:6px; margin-top:4px; }
+        .ocard .agrow { display:flex; gap:6px; align-items:center; }
+        .ocard .ag-in { flex:1; padding:7px 9px; border:1px solid #e3e9f3; border-radius:7px; font-size:13px; background:#fff; }
+        .ocard .agbtn { width:28px; border:1px solid #e3c9c9; background:#fff; color:#b3261e; border-radius:7px; cursor:pointer; font-size:14px; }
+        .ocard .agadd { margin-top:7px; font-size:12px; padding:6px 10px; border:1px dashed #c9d6ec; background:#f7faff; color:#0b3d91; border-radius:8px; cursor:pointer; }
+        .addtoc { font-size:11px; padding:2px 8px; margin-left:6px; border:1px solid #d8b878; background:#fff; color:#8a5a00; border-radius:7px; cursor:pointer; }
+        .warnbox { background:#fff7e6; border:1px solid #ffe1a8; color:#8a5a00; border-radius:10px; padding:11px 14px; font-size:13px; margin-bottom:14px; }
+        .warnbox ul { margin:6px 0 0; padding-left:18px; } .warnbox li { margin:2px 0; }
+        .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1f2937; color:#fff; padding:10px 18px; border-radius:10px; font-size:13px; box-shadow:0 6px 20px rgba(0,0,0,.2); z-index:99; }
         .result { text-align:center; padding:20px 10px; }
         .result .big { font-size:18px; font-weight:700; color:var(--brand); margin-bottom:8px; }
         .result .msg { color:var(--muted); font-size:14px; line-height:1.7; }
@@ -148,10 +170,12 @@
     <div id="view-outline" class="hide">
         <div class="card">
             <h2>3 · 生成并调整大纲</h2>
-            <p class="sub">检查每页标题与要点，可直接编辑。满意后确认生成 PPT。</p>
+            <p class="sub">检查并编辑封面、目录、每页标题/要点/章节归属与页面类型。满意后确认生成 PPT。</p>
+            <div id="outline-warn" class="warnbox hide"></div>
             <div id="outline-list"></div>
             <div class="actions">
                 <button class="btn green" id="btn-confirm" onclick="confirmGenerate()">确认大纲并生成 PPT</button>
+                <button class="btn ghost" id="btn-save" onclick="saveOutline()">保存大纲</button>
                 <button class="btn ghost" onclick="backToInput()">返回修改</button>
             </div>
         </div>
@@ -296,6 +320,7 @@ async function genOutline() {
         const data = await resp.json();
         if (data.status === 'error') { alert(data.message || '请调整页数后重试'); return; }
         currentOutline = data.outline || [];
+        if (data.page_type_options) ptypeOptions = data.page_type_options;
         renderOutline();
         document.getElementById('view-input').classList.add('hide');
         document.getElementById('view-outline').classList.remove('hide');
@@ -307,23 +332,135 @@ async function genOutline() {
         btn.disabled = false; btn.textContent = '生成大纲';
     }
 }
+const PTYPE_LABELS = { cover:'封面页', agenda:'目录页', content:'正文页', table:'表格页', chart:'图表页', closing:'结束页' };
+let ptypeOptions = ['cover','agenda','content','table','chart','closing'];
+function esc(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+function roleOf(p, i, n){ return p.page_type || (i===0?'cover':(i===1?'agenda':((i===n-1&&n>=3)?'closing':'content'))); }
+
 function renderOutline() {
     const wrap = document.getElementById('outline-list');
     wrap.innerHTML = '';
+    const n = currentOutline.length;
     currentOutline.forEach((p, i) => {
-        const d = document.createElement('div'); d.className = 'ocard';
+        const role = roleOf(p, i, n);
+        p.page_type = role;
+        const d = document.createElement('div'); d.className = 'ocard' + (['cover','agenda','closing'].includes(role)?(' '+role):'');
+        const opts = ptypeOptions.map(o => `<option value="${o}"${o===role?' selected':''}>${PTYPE_LABELS[o]||o}</option>`).join('');
+        const showSection = !['cover','agenda','closing'].includes(role);
+        // Agenda page gets per-item inputs so editing a 一级目录 item can sync the
+        // matching body 章节归属 (Scope A+); other pages keep a points textarea.
+        let ptsEditor;
+        if (role==='agenda') {
+            const rows = (p.points||[]).map((it,k)=>`<div class="agrow">
+                <input class="ag-in" value="${esc(it)}" onchange="editAgendaItem(${i},${k},this.value)" placeholder="目录项 ${k+1}">
+                <button class="agbtn" onclick="delAgendaItem(${i},${k})" title="删除">×</button></div>`).join('');
+            ptsEditor = `<div class="fld">目录项（编辑将同步对应正文页的章节归属）</div>
+                <div class="aglist">${rows}</div>
+                <button class="agadd" onclick="addAgendaItem(${i})">+ 添加目录项</button>`;
+        } else {
+            const ptsLabel = role==='cover' ? '副标题 / 要点（每行一个）' : '要点（每行一个）';
+            ptsEditor = `<div class="fld">${ptsLabel}</div>
+                <textarea class="pts" oninput="editPoints(${i}, this.value)">${esc((p.points||[]).join('\n'))}</textarea>`;
+        }
         d.innerHTML = `
             <div class="head">
                 <span class="pg">第 ${p.page} 页</span>
-                <span class="sec">${p.section || ''}</span>
+                <span class="role-tag ${role}">${PTYPE_LABELS[role]||role}</span>
+                <span class="tpn">模板页 #${p.template_page_number||p.page}${p.section_id?(' · 章节 '+esc(p.section_id)):''}</span>
             </div>
-            <input class="title" value="${(p.title||'').replace(/"/g,'&quot;')}" oninput="editTitle(${i}, this.value)">
-            <textarea class="pts" oninput="editPoints(${i}, this.value)">${(p.points||[]).join('\n')}</textarea>`;
+            <div class="meta">
+                <span class="fld" style="margin:0">页面类型</span>
+                <select class="ptype" onchange="editType(${i}, this.value)">${opts}</select>
+            </div>
+            <input class="title" value="${esc(p.title)}" oninput="editTitle(${i}, this.value)" placeholder="本页标题">
+            ${showSection ? `<div class="fld">所属章节（section_title）</div>
+              <input class="sec-in" value="${esc(p.section_title)}" oninput="editSection(${i}, this.value)" placeholder="例如：经营质效与财务表现">
+              <div class="fld">本页在该章节中的作用</div>
+              <input class="role-in" value="${esc(p.slide_role_under_section)}" oninput="editRole(${i}, this.value)" placeholder="一句话说明本页如何支撑该章节">` : ``}
+            ${ptsEditor}`;
         wrap.appendChild(d);
     });
+    renderWarnings();
 }
-function editTitle(i, v) { currentOutline[i].title = v; }
-function editPoints(i, v) { currentOutline[i].points = v.split('\n').map(s=>s.trim()).filter(Boolean); }
+function editTitle(i, v) { currentOutline[i].title = v; if(i>=2) renderWarnings(); }
+function editPoints(i, v) { currentOutline[i].points = v.split('\n').map(s=>s.trim()).filter(Boolean); renderWarnings(); }
+function editType(i, v) { currentOutline[i].page_type = v; renderOutline(); }
+function editSection(i, v) { currentOutline[i].section_title = v.trim(); renderWarnings(); }
+function editRole(i, v) { currentOutline[i].slide_role_under_section = v.trim(); }
+
+// Scope A+ · agenda item (一级/二级口径) edit → sync matching body section_title (三级口径).
+// Body title/points are NOT auto-rewritten — surfaced as a warning for manual confirmation.
+function editAgendaItem(i, k, val) {
+    val = (val||'').trim();
+    const items = currentOutline[i].points || (currentOutline[i].points = []);
+    const old = (items[k]||'').trim();
+    if (val === old) return;
+    items[k] = val;
+    let synced = 0;
+    if (old) currentOutline.forEach((c, ci) => {
+        if (ci >= 2 && (c.section_title||'').trim() === old) { c.section_title = val; synced++; }
+    });
+    renderOutline();
+    showToast(synced ? `已同步 ${synced} 个正文页的章节归属（正文要点未自动重写，请人工确认）` : '目录项已更新');
+}
+function delAgendaItem(i, k) { (currentOutline[i].points||[]).splice(k,1); renderOutline(); }
+function addAgendaItem(i) { (currentOutline[i].points || (currentOutline[i].points=[])).push(''); renderOutline(); }
+function addToAgenda(idx) {
+    const st = (window._orphanSections||[])[idx];
+    const n = currentOutline.length; if (!st || n < 2) return;
+    currentOutline[1].points = currentOutline[1].points || [];
+    if (!currentOutline[1].points.includes(st)) currentOutline[1].points.push(st);
+    renderOutline();
+    showToast('已加入目录项');
+}
+
+// Client-side structural check (mirrors backend _validate_confirmed_outline, advisory).
+function computeWarnings() {
+    const n = currentOutline.length, msgs = [], orphans = [];
+    if (n < 1) return { msgs, orphans };
+    if (roleOf(currentOutline[0],0,n) !== 'cover') msgs.push('第 1 页建议为封面页。');
+    if (n>=2 && roleOf(currentOutline[1],1,n) !== 'agenda') msgs.push('第 2 页建议为目录/章节页。');
+    if (n>=3 && roleOf(currentOutline[n-1],n-1,n) !== 'closing') msgs.push('最后一页建议为结束/封底页。');
+    // title / points consistency (advisory; never blocks)
+    currentOutline.forEach((c, i) => {
+        const role = roleOf(c, i, n);
+        if (['content','chart','table'].includes(role)) {
+            const hasTitle = (c.title||'').trim().length > 0;
+            const hasPts = (c.points||[]).filter(s => (s||'').trim()).length > 0;
+            if (hasTitle && !hasPts) msgs.push(`第 ${c.page} 页有标题但无要点（改了标题后请补充/确认要点）。`);
+        }
+    });
+    const items = n>=2 ? (currentOutline[1].points||[]).map(s=>s.trim()).filter(Boolean) : [];
+    currentOutline.slice(2, n>=3?-1:n).forEach(c => {
+        const st = (c.section_title||'').trim();
+        if (st && items.length && !items.includes(st) && !orphans.includes(st)) orphans.push(st);
+    });
+    return { msgs, orphans };
+}
+function renderWarnings() {
+    const box = document.getElementById('outline-warn');
+    const { msgs, orphans } = computeWarnings();
+    window._orphanSections = orphans;
+    if (!msgs.length && !orphans.length) { box.classList.add('hide'); box.innerHTML=''; return; }
+    box.classList.remove('hide');
+    let html = '⚠ 结构提示（可继续生成）：<ul>' + msgs.map(x=>`<li>${esc(x)}</li>`).join('');
+    orphans.forEach((st, idx) => {
+        html += `<li>正文章节「${esc(st)}」不在目录项中
+            <button class="addtoc" onclick="addToAgenda(${idx})">加入目录</button></li>`;
+    });
+    box.innerHTML = html + '</ul>';
+}
+function showToast(msg) {
+    const t = document.createElement('div'); t.className='toast'; t.textContent=msg;
+    document.body.appendChild(t); setTimeout(()=>t.remove(), 2600);
+}
+function saveOutline() {
+    // Local save: re-normalize, re-validate, surface warnings. Outline is sent on generate.
+    renderOutline();
+    const { msgs, orphans } = computeWarnings();
+    const c = msgs.length + orphans.length;
+    showToast(c ? `已保存（${c} 条结构提示）` : '大纲已保存 ✓');
+}
 function backToInput() {
     document.getElementById('view-outline').classList.add('hide');
     document.getElementById('view-input').classList.remove('hide');
@@ -345,6 +482,13 @@ async function confirmGenerate() {
             body: JSON.stringify(generatePayload())
         });
         const data = await resp.json();
+        if (data.status === 'error') {
+            document.getElementById('result-body').innerHTML = `
+                <div class="big" style="color:#b3261e">大纲校验未通过</div>
+                <div class="msg">${esc(data.message || '请修正大纲后重试。')}</div>
+                <div style="margin-top:16px"><button class="btn ghost" onclick="backToOutlineFromResult()">返回大纲修改</button></div>`;
+            return;
+        }
         const refLine = `<div class="ref">生成编号：${data.reference || '—'} · 模板：${data.template_name || ''} · ${data.outline_pages || 0} 页</div>`;
         if (data.ready && data.job_id) {
             document.getElementById('result-body').innerHTML = `
