@@ -16,6 +16,32 @@ def _encode_image(image_path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+def _strip_json_fences(raw: str) -> str:
+    """Strip markdown code fences and surrounding prose from an LLM JSON response.
+
+    Q3d: models occasionally wrap JSON in ```json … ``` or add a sentence before the
+    object. We unwrap a fenced block if present, else slice from the first { or [ to the
+    matching last } or ]. Returns the best-effort JSON substring (caller still json.loads)."""
+    if not isinstance(raw, str):
+        return raw
+    s = raw.strip()
+    if s.startswith("```"):
+        # drop the opening fence line (``` or ```json) and the trailing fence
+        s = s.split("\n", 1)[1] if "\n" in s else s
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+        if s.lower().startswith("json"):
+            s = s[4:].lstrip()
+    # If still not starting with a JSON token, slice to the outermost object/array.
+    if s and s[0] not in "{[":
+        starts = [p for p in (s.find("{"), s.find("[")) if p != -1]
+        ends = [p for p in (s.rfind("}"), s.rfind("]")) if p != -1]
+        if starts and ends and max(ends) > min(starts):
+            s = s[min(starts):max(ends) + 1]
+    return s
+
+
 class LLMSkill:
     """Unified LLM client for OpenAI-compatible APIs. Supports text and vision."""
 
@@ -152,8 +178,16 @@ class LLMSkill:
 
     def chat_structured(self, prompt: str, system: str = None, temperature: float = None, enable_thinking: bool = True) -> dict:
         raw = self.chat(prompt, system=system, temperature=temperature, json_mode=True, enable_thinking=enable_thinking)
+        # Q3d robustness: tolerate fenced/prose-wrapped JSON; one bounded re-ask on failure.
         try:
-            return json.loads(raw)
+            return json.loads(_strip_json_fences(raw))
         except json.JSONDecodeError:
-            logger.error(f"Failed to parse LLM JSON response: {raw}")
-            raise
+            logger.warning("LLM JSON parse failed; retrying once with a stricter instruction.")
+            try:
+                raw2 = self.chat(prompt + "\n\n只输出合法 JSON，不要任何解释或代码块标记。",
+                                 system=system, temperature=temperature, json_mode=True,
+                                 enable_thinking=enable_thinking)
+                return json.loads(_strip_json_fences(raw2))
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM JSON response after retry: {raw[:500]}")
+                raise ValueError(f"LLM 返回的不是合法 JSON：{e}") from e
