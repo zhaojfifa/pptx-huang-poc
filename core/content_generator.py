@@ -14,6 +14,25 @@ from skills.skill_llm.llm_skill import LLMSkill
 logger = logging.getLogger(__name__)
 
 
+def _safe_text(value) -> str:
+    """Coerce an LLM-supplied JSON field into a plain string.
+
+    LLMs occasionally return a list/dict/None where a string is expected
+    (e.g. ``title`` or ``key_points`` entries). Calling ``.lower()`` /
+    ``.strip()`` on those raises ``AttributeError``. This normalizes them
+    before any string operation or matching.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(_safe_text(v) for v in value)
+    if isinstance(value, dict):
+        return " ".join(_safe_text(v) for v in value.values())
+    return str(value)
+
+
 class ContentGenerator:
     def __init__(self):
         self.llm = LLMSkill()
@@ -310,9 +329,9 @@ Return JSON:
 
         # Agenda-to-slides consistency injection (top-down): keep this slide as a supporting
         # detail under its assigned agenda section; do not drift to unrelated themes.
-        _agenda_section = (slide_outline.get("_agenda_section")
-                           or slide_outline.get("section_title") or "").strip()
-        _slide_role = (slide_outline.get("slide_role_under_section") or "").strip()
+        _agenda_section = _safe_text(slide_outline.get("_agenda_section")
+                                     or slide_outline.get("section_title") or "").strip()
+        _slide_role = _safe_text(slide_outline.get("slide_role_under_section") or "").strip()
         if _agenda_section and _ptype not in ("cover", "agenda", "closing"):
             page_type_block += (
                 f"\n=== 目录归属（必须遵守）===\n"
@@ -872,9 +891,11 @@ Return corrected JSON:
         """
         if not document_markdown:
             return ""
-        title = slide_outline.get("title", "")
+        title = _safe_text(slide_outline.get("title", ""))
         key_points = slide_outline.get("key_points", [])
-        keywords = [title] + key_points
+        if not isinstance(key_points, list):
+            key_points = [key_points]
+        keywords = [title] + [_safe_text(kp) for kp in key_points]
         lines = document_markdown.split("\n")
         scored = []
         for line in lines:
