@@ -88,6 +88,137 @@ class PPTScreenshotSkill:
 
         return self._export_via_libreoffice(pptx_path, str(output_dir_p), soffice)
 
+    def export_single_slide(self, pptx_path: str, output_dir: str, slide_index: int) -> str:
+        """Export ONE slide (1-based ``slide_index``) of a PPTX to ``slide_{index}.png``.
+
+        Same dual-backend strategy as :meth:`export_slides` (Windows COM preferred,
+        else LibreOffice→PDF→pypdfium2). Returns the PNG path. Raises RuntimeError if
+        no backend can produce output or the index is out of range. Used by single-page
+        template reanalysis (PR-Q3c-2) — avoids re-rendering the whole deck.
+        """
+        if slide_index < 1:
+            raise ValueError(f"slide_index must be >= 1, got {slide_index}")
+        pptx_path = str(Path(pptx_path).resolve())
+        output_dir_p = Path(output_dir).resolve()
+        output_dir_p.mkdir(parents=True, exist_ok=True)
+
+        # Backend 1: Windows COM
+        if sys.platform.startswith("win") or sys.platform == "cygwin":
+            try:
+                return self._export_single_via_powerpoint_com(pptx_path, str(output_dir_p), slide_index)
+            except Exception as exc:
+                logger.warning(f"PowerPoint COM single-slide export failed, trying LibreOffice: {exc}")
+
+        # Backend 2: LibreOffice + pypdfium2 (cross-platform / cloud Linux / macOS)
+        soffice = _find_soffice()
+        if soffice is None:
+            raise RuntimeError(
+                "No screenshot backend available. Install LibreOffice (provides `soffice`) "
+                "or run on Windows with PowerPoint + pywin32."
+            )
+        try:
+            import pypdfium2  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "pypdfium2 is required for the LibreOffice screenshot backend. "
+                "Install: pip install pypdfium2"
+            ) from exc
+        return self._export_single_via_libreoffice(pptx_path, str(output_dir_p), soffice, slide_index)
+
+    def _export_single_via_powerpoint_com(self, pptx_path: str, output_dir: str, slide_index: int) -> str:
+        import win32com.client
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        ppt = None
+        presentation = None
+        try:
+            ppt = win32com.client.Dispatch("PowerPoint.Application")
+            try:
+                ppt.Visible = False
+            except Exception:
+                pass
+            ppt.DisplayAlerts = False
+            presentation = ppt.Presentations.Open(pptx_path)
+            slide_count = presentation.Slides.Count
+            if slide_index > slide_count:
+                raise RuntimeError(f"slide_index {slide_index} out of range (deck has {slide_count} slides)")
+            output_path = os.path.join(output_dir, f"slide_{slide_index}.png")
+            presentation.Slides(slide_index).Export(output_path, "PNG", self.width, self.height)
+            logger.info(f"[COM backend] Exported single slide {slide_index} to {output_path}")
+            return output_path
+        finally:
+            if presentation:
+                try:
+                    presentation.Close()
+                except Exception:
+                    pass
+            if ppt:
+                try:
+                    ppt.Quit()
+                except Exception:
+                    pass
+            pythoncom.CoUninitialize()
+
+    def _export_single_via_libreoffice(self, pptx_path: str, output_dir: str, soffice: str, slide_index: int) -> str:
+        import pypdfium2 as pdfium
+        from PIL import Image
+
+        logger.info(f"[LO backend] single-slide {slide_index}: soffice={soffice} pptx={pptx_path}")
+        # soffice converts the whole deck to PDF (no per-slide convert); we then rasterize
+        # only the requested page. One isolated profile/workdir, cleaned up afterwards.
+        pdf_workdir = Path(output_dir) / "_pdf_workdir_single"
+        pdf_workdir.mkdir(parents=True, exist_ok=True)
+        user_profile = Path(output_dir) / "_lo_user_profile_single"
+        user_profile.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            soffice, "--headless", "--norestore", "--nofirststartwizard",
+            f"-env:UserInstallation=file://{user_profile}",
+            "--convert-to", "pdf", "--outdir", str(pdf_workdir), pptx_path,
+        ]
+        logger.info(f"[LO backend] running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"soffice PDF conversion failed (rc={result.returncode}). "
+                f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            )
+        pdf_path = pdf_workdir / (Path(pptx_path).stem + ".pdf")
+        if not pdf_path.exists():
+            pdfs = list(pdf_workdir.glob("*.pdf"))
+            if not pdfs:
+                raise RuntimeError(f"soffice produced no PDF in {pdf_workdir}")
+            pdf_path = pdfs[0]
+
+        output_path = os.path.join(output_dir, f"slide_{slide_index}.png")
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        try:
+            slide_count = len(pdf)
+            if slide_index > slide_count:
+                raise RuntimeError(f"slide_index {slide_index} out of range (PDF has {slide_count} pages)")
+            page = pdf[slide_index - 1]
+            target_w, target_h = self.width, self.height
+            nat_w, nat_h = page.get_size()
+            scale = max(target_w / nat_w, target_h / nat_h)
+            img = page.render(scale=scale).to_pil()
+            if img.size != (target_w, target_h):
+                img.thumbnail((target_w, target_h), Image.LANCZOS)
+                canvas = Image.new("RGB", (target_w, target_h), "white")
+                x = (target_w - img.width) // 2
+                y = (target_h - img.height) // 2
+                canvas.paste(img, (x, y))
+                img = canvas
+            img.save(output_path, "PNG")
+            logger.info(f"[LO backend] Exported single slide {slide_index} to {output_path}")
+        finally:
+            pdf.close()
+        try:
+            shutil.rmtree(pdf_workdir, ignore_errors=True)
+            shutil.rmtree(user_profile, ignore_errors=True)
+        except Exception:
+            pass
+        return output_path
+
     def _export_via_powerpoint_com(self, pptx_path: str, output_dir: str) -> List[str]:
         import win32com.client
         import pythoncom

@@ -492,13 +492,140 @@ Return valid JSON only.
     return llm.chat_structured(prompt, system=system, enable_thinking=False)
 
 
+def regenerate_single_page(template_id: int, page_number: int) -> dict:
+    """Re-analyze ONE page of an existing template and update only that row (PR-Q3c-2).
+
+    Reuses the same per-page helpers as the full analyzer (markdown split, layout extraction,
+    text + optional vision analysis, generation_hints, page_type classify) but for a single
+    1-based ``page_number``. Generate-then-replace: everything is computed into locals first and
+    the DB row is updated only on success, so a failed re-analysis NEVER corrupts the existing
+    row. Does NOT create a template or touch other pages. Idempotent on repeat.
+
+    Returns a result dict {ok, template_id, page_number, page_type, has_screenshot} or
+    {ok: False, error, ...}.
+    """
+    tpl = TemplateDAO.get_by_id(template_id)
+    if not tpl:
+        return {"ok": False, "error": f"template {template_id} not found", "template_id": template_id}
+    file_path = tpl.get("file_path")
+    if not file_path or not Path(file_path).exists():
+        return {"ok": False, "error": f"template file not found: {file_path}", "template_id": template_id}
+
+    # Ensure the (template_id, page_number) row already exists — reanalysis updates in place only.
+    existing = {p["page_number"]: p for p in TemplatePageDAO.get_by_template(template_id)}
+    prs = Presentation(str(file_path))
+    total = len(prs.slides)
+    if not (1 <= page_number <= total):
+        return {"ok": False, "error": f"page_number {page_number} out of range (1..{total})",
+                "template_id": template_id}
+    if page_number not in existing:
+        return {"ok": False, "error": f"no existing row for template {template_id} page {page_number}; "
+                f"run a full analyze first", "template_id": template_id}
+
+    logger.info(f"Single-page reanalysis: template {template_id} page {page_number} ({file_path})")
+    llm = LLMSkill()
+
+    # --- markdown + layout for this page (no write yet) ---
+    try:
+        full_md = MarkItDownSkill().convert(str(file_path))
+    except Exception as e:
+        logger.warning(f"markitdown failed: {e}")
+        full_md = ""
+    page_md = split_markdown_by_slide(full_md, total)[page_number - 1]
+    layout = extract_layout_json(prs, page_number - 1)
+
+    # --- single-slide screenshot (vision is OPTIONAL; failure skips vision, never aborts) ---
+    screenshot_path = None
+    try:
+        from skills.skill_ppt_screenshot.ppt_screenshot_skill import PPTScreenshotSkill
+        screenshot_dir = LOGS_DIR / f"template_screenshots_{template_id}"
+        screenshot_path = PPTScreenshotSkill(width=1920, height=1080).export_single_slide(
+            str(file_path), str(screenshot_dir), page_number)
+        logger.info(f"Single-slide screenshot: {screenshot_path}")
+    except Exception as e:
+        logger.warning(f"Single-slide screenshot failed (vision will be skipped): {e}")
+
+    # --- text analysis (REQUIRED): on failure, abort WITHOUT writing → old row preserved ---
+    try:
+        visual_json = analyze_with_llm(llm, page_md, layout, page_number)
+        if isinstance(visual_json, dict) and visual_json.get("error"):
+            return {"ok": False, "error": f"text analysis error: {visual_json['error']}",
+                    "template_id": template_id, "page_number": page_number}
+    except Exception as e:
+        logger.error(f"Text analysis failed for page {page_number}: {e}")
+        return {"ok": False, "error": f"text analysis failed: {e}",
+                "template_id": template_id, "page_number": page_number}
+
+    # --- vision (optional) ---
+    if screenshot_path:
+        try:
+            visual_json["vision_analysis"] = analyze_with_vision(llm, screenshot_path, page_number)
+            visual_json["has_screenshot"] = True
+        except Exception as e:
+            logger.warning(f"Vision analysis failed for page {page_number}: {e}")
+            visual_json["vision_analysis"] = {"error": str(e)}
+            visual_json["has_screenshot"] = False
+    else:
+        visual_json["has_screenshot"] = False
+
+    # --- blueprint + generation_hints + page_type (REQUIRED): abort-without-write on failure ---
+    try:
+        engine = TemplateStyleEngine({"layout_json": layout, "visual_json": visual_json})
+        blueprint = engine.blueprint
+        generation_hints = analyze_generation_hints(llm, layout, visual_json, blueprint, page_number)
+        page_type = None
+        try:
+            from core import page_type_prompt as _ptp
+            _raw = _ptp.classify(slide_index=page_number, total_pages=total,
+                                 outline_type=None, slots=_ptp.slot_summary(blueprint))
+            page_type = _PAGE_TYPE_CANON.get(_raw, "content")
+        except Exception as _e:
+            logger.warning(f"page_type classify failed for page {page_number}: {_e}")
+            page_type = None
+    except Exception as e:
+        logger.error(f"blueprint/generation_hints failed for page {page_number}: {e}")
+        return {"ok": False, "error": f"blueprint/hints failed: {e}",
+                "template_id": template_id, "page_number": page_number}
+
+    # --- replace: single-row, in-place update (other pages untouched) ---
+    affected = TemplatePageDAO.update_by_template_page(
+        template_id, page_number,
+        markdown_content=page_md, layout_json=layout, visual_json=visual_json,
+        generation_hints=generation_hints, page_type=page_type,
+    )
+    if not affected:
+        return {"ok": False, "error": "update affected 0 rows (row vanished?)",
+                "template_id": template_id, "page_number": page_number}
+    logger.info(f"Single-page reanalysis complete: template {template_id} page {page_number} "
+                f"(page_type={page_type}, has_screenshot={bool(screenshot_path)}).")
+    return {"ok": True, "template_id": template_id, "page_number": page_number,
+            "page_type": page_type, "has_screenshot": bool(screenshot_path)}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze PPT template and store in database")
-    parser.add_argument("--input", required=True, help="Path to .pptx template file")
-    parser.add_argument("--name", required=True, help="Template name")
+    parser.add_argument("--input", required=False, help="Path to .pptx template file (full analyze)")
+    parser.add_argument("--name", required=False, help="Template name (full analyze)")
+    parser.add_argument("--template_id", type=int, required=False,
+                        help="Existing template id (single-page reanalysis; with --page_number)")
+    parser.add_argument("--page_number", type=int, required=False,
+                        help="1-based page to reanalyze (single-page reanalysis; with --template_id)")
     args = parser.parse_args()
 
     init_db()
+
+    # Single-page reanalysis mode (PR-Q3c-2): update only one existing page row.
+    if args.template_id is not None and args.page_number is not None:
+        res = regenerate_single_page(args.template_id, args.page_number)
+        if not res.get("ok"):
+            logger.error(f"Single-page reanalysis failed: {res.get('error')}")
+            sys.exit(1)
+        print(f"Reanalyzed template {res['template_id']} page {res['page_number']} "
+              f"(page_type={res.get('page_type')}, has_screenshot={res.get('has_screenshot')})")
+        return
+
+    if not (args.input and args.name):
+        parser.error("--input and --name are required unless using --template_id and --page_number")
 
     input_path = Path(args.input)
     if not input_path.exists():

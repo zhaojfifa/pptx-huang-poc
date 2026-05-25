@@ -1219,14 +1219,30 @@ def custom_set_page_type(payload: dict = Body(...)):
 
 @app.post("/api/custom-template/reanalyze-page")
 def custom_reanalyze_page(payload: dict = Body(...)):
-    """PR-Q3b Scope D/E: single-page re-analysis. Deferred to PR-Q3c — returns an
-    explicit not-implemented response (never a fake success), so the UI can show it."""
-    return JSONResponse(
-        {"status": "not_implemented",
-         "code": "single_page_reanalysis_deferred",
-         "message": "单页重新分析将在 PR-Q3c 提供。当前可手动校准 page_type，或对整模板重新分析。",
-         "template_id": payload.get("template_id"), "page_number": payload.get("page_number")},
-        status_code=501)
+    """PR-Q3c-2: re-analyze a single template page in place. Updates ONLY the
+    (template_id, page_number) row via generate-then-replace; a failure leaves the
+    existing row intact (never a fake success). Runs synchronously (one slide)."""
+    template_id = payload.get("template_id")
+    page_number = payload.get("page_number")
+    if not template_id or not page_number:
+        return JSONResponse({"status": "error", "message": "缺少 template_id 或 page_number。"},
+                            status_code=400)
+    try:
+        from template_analyzer.analyze_template import regenerate_single_page
+        res = regenerate_single_page(int(template_id), int(page_number))
+    except Exception as e:
+        logger.error(f"reanalyze-page crashed (template {template_id} page {page_number}): {e}")
+        return JSONResponse({"status": "error", "message": f"重新分析异常：{e}",
+                             "template_id": template_id, "page_number": page_number},
+                            status_code=500)
+    if not res.get("ok"):
+        return JSONResponse({"status": "error", "message": res.get("error", "重新分析失败"),
+                             "template_id": template_id, "page_number": page_number},
+                            status_code=422)
+    logger.info(f"reanalyze-page ok: template {template_id} page {page_number} "
+                f"→ page_type={res.get('page_type')}")
+    return {"status": "ok", "template_id": res["template_id"], "page_number": res["page_number"],
+            "page_type": res.get("page_type"), "has_screenshot": res.get("has_screenshot")}
 
 
 @app.post("/api/custom-template/outline")
