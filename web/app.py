@@ -1036,7 +1036,10 @@ def _build_template_index(template_name: str) -> list:
         tables = sum(1 for s in shapes if "table" in s)
         pics = sum(1 for s in shapes if s.get("is_picture"))
         groups = sum(1 for s in shapes if "GROUP" in str(s.get("shape_type", "")))
-        ptype = ptp.classify(p["page_number"], total, None, ptp.slot_summary(bp))
+        # PR-Q3a: prefer the persisted page_type (human-calibratable) when present;
+        # otherwise classify at runtime.
+        _persisted = (p.get("page_type") or "").strip()
+        ptype = _persisted or ptp.classify(p["page_number"], total, None, ptp.slot_summary(bp))
         md = p.get("markdown_content") or ""
         warns = []
         hit = [kw for kw in _POLLUTION_KW if kw in md]

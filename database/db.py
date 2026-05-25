@@ -72,6 +72,7 @@ def init_db():
             layout_json LONGTEXT,
             visual_json LONGTEXT,
             generation_hints LONGTEXT,
+            page_type VARCHAR(50) DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (template_id) REFERENCES templates(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -112,6 +113,21 @@ def init_db():
             logger.debug("generation_hints column already exists.")
         else:
             logger.warning(f"Migration check for generation_hints: {e}")
+
+    # Add page_type column if not exists (PR-Q3a migration; duplicate-tolerant, additive,
+    # nullable — existing rows keep NULL and remain valid; no pagetype LONGTEXT).
+    try:
+        cursor.execute("""
+            ALTER TABLE template_pages
+            ADD COLUMN page_type VARCHAR(50) DEFAULT NULL
+        """)
+        conn.commit()
+        logger.info("Added page_type column to template_pages.")
+    except Error as e:
+        if "Duplicate column name" in str(e):
+            logger.debug("page_type column already exists.")
+        else:
+            logger.warning(f"Migration check for page_type: {e}")
 
     conn.commit()
     cursor.close()
@@ -160,18 +176,19 @@ class TemplateDAO:
 
 class TemplatePageDAO:
     @staticmethod
-    def create(template_id: int, page_number: int, markdown_content: str, layout_json: dict, visual_json: dict, generation_hints: dict = None):
+    def create(template_id: int, page_number: int, markdown_content: str, layout_json: dict, visual_json: dict, generation_hints: dict = None, page_type: str = None):
         conn = get_connection()
         cursor = conn.cursor()
         sql = """
-            INSERT INTO template_pages (template_id, page_number, markdown_content, layout_json, visual_json, generation_hints)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO template_pages (template_id, page_number, markdown_content, layout_json, visual_json, generation_hints, page_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute(sql, (
             template_id, page_number, markdown_content,
             json.dumps(layout_json, ensure_ascii=False),
             json.dumps(visual_json, ensure_ascii=False),
-            json.dumps(generation_hints, ensure_ascii=False) if generation_hints else None
+            json.dumps(generation_hints, ensure_ascii=False) if generation_hints else None,
+            page_type,
         ))
         conn.commit()
         pid = cursor.lastrowid

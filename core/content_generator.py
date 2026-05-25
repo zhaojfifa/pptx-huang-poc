@@ -316,14 +316,21 @@ Return JSON:
         row_order = slots.get("_row_order", slots.get("content", []))
         total_slots = len(row_order)
 
-        # Page-type prompt router: pick per-type guidance from outline hint + slots
+        # Page-type prompt router: pick per-type guidance.
+        # PR-Q3a: prefer the persisted template_pages.page_type when present (authoritative,
+        # human-calibratable); otherwise fall back to the runtime classifier. Never removes
+        # the runtime path — NULL/empty page_type keeps existing behavior intact.
         from core import page_type_prompt as ptp
-        _ptype = ptp.classify(
-            slide_index=slide_outline.get("slide_number", 1),
-            total_pages=slide_outline.get("_total_pages", slide_outline.get("slide_number", 1)),
-            outline_type=slide_outline.get("type"),
-            slots=ptp.slot_summary(bp),
-        )
+        _persisted_pt = (template_page.get("page_type") or "").strip() if isinstance(template_page, dict) else ""
+        if _persisted_pt:
+            _ptype = _persisted_pt
+        else:
+            _ptype = ptp.classify(
+                slide_index=slide_outline.get("slide_number", 1),
+                total_pages=slide_outline.get("_total_pages", slide_outline.get("slide_number", 1)),
+                outline_type=slide_outline.get("type"),
+                slots=ptp.slot_summary(bp),
+            )
         _tkey = slide_outline.get("_template_key")
         page_type_block = f"=== 页面类型指引 ===\n{ptp.content_guidance(_ptype, _tkey)}"
 

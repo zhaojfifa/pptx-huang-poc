@@ -34,6 +34,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# PR-Q3a: map the project's page_type_prompt.classify() output to the canonical persisted
+# set {cover, agenda, content, table, chart, closing}. summary/dense_labels collapse to
+# content; chart is an outline-time distinction, not derivable from a static template page.
+_PAGE_TYPE_CANON = {
+    "cover": "cover", "agenda": "agenda", "table": "table", "closing": "closing",
+    "content": "content", "summary": "content", "dense_labels": "content",
+}
+
 
 def extract_shape_info(shape):
     """Extract detailed shape properties."""
@@ -242,12 +250,23 @@ def split_markdown_by_slide(full_md: str, num_slides: int) -> list:
     marker = re.compile(r"<!--\s*Slide number:\s*(\d+)\s*-->", re.IGNORECASE)
     matches = list(marker.finditer(full_md))
     if matches:
+        # PR-Q3a robustness (ported from data/pptx_agent_20260525):
+        #  - content before the first marker belongs to slide 1 (don't drop it)
+        #  - duplicate markers for the same slide are appended, not overwritten
+        prefix = full_md[:matches[0].start()].strip()
         for i, m in enumerate(matches):
             n = int(m.group(1))
             start = m.end()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(full_md)
-            if 1 <= n <= num_slides:
-                pages[n - 1] = full_md[start:end].strip()
+            if not (1 <= n <= num_slides):
+                continue
+            content = full_md[start:end].strip()
+            if i == 0 and prefix:
+                content = (prefix + "\n\n" + content).strip()
+            if pages[n - 1]:
+                pages[n - 1] += "\n\n" + content
+            else:
+                pages[n - 1] = content
         return pages
 
     # Fallback: even-line distribution (legacy behavior)
@@ -285,7 +304,7 @@ Please analyze and return a JSON object with these fields:
 
 Return valid JSON only.
 """
-    return llm.chat_structured(prompt, system=system)
+    return llm.chat_structured(prompt, system=system, enable_thinking=False)
 
 
 def analyze_with_vision(llm: LLMSkill, image_path: str, page_number: int) -> dict:
@@ -326,7 +345,7 @@ Return a JSON object with these fields:
 
 Return valid JSON only.
 """
-    raw = llm.chat_with_image(prompt, image_path, system=system, json_mode=True)
+    raw = llm.chat_with_image(prompt, image_path, system=system, json_mode=True, enable_thinking=False)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -470,7 +489,7 @@ Please return a JSON object with:
 
 Return valid JSON only.
 """
-    return llm.chat_structured(prompt, system=system)
+    return llm.chat_structured(prompt, system=system, enable_thinking=False)
 
 
 def main():
@@ -569,12 +588,23 @@ def main():
             visual_json["has_screenshot"] = False
 
         # 3. Build blueprint and generate per-page content generation hints
+        page_type = None  # PR-Q3a: persisted structural page role (NULL if weak/unknown)
         try:
             template_page_data = {"layout_json": layout, "visual_json": visual_json}
             engine = TemplateStyleEngine(template_page_data)
             blueprint = engine.blueprint
             generation_hints = analyze_generation_hints(llm, layout, visual_json, blueprint, idx + 1)
             logger.info(f"Generation hints created for page {idx + 1}")
+            # Classify + persist the structural page role using the project's existing
+            # runtime classifier (no LLM), mapped to canonical values.
+            try:
+                from core import page_type_prompt as _ptp
+                _raw = _ptp.classify(slide_index=idx + 1, total_pages=len(prs.slides),
+                                     outline_type=None, slots=_ptp.slot_summary(blueprint))
+                page_type = _PAGE_TYPE_CANON.get(_raw, "content")
+            except Exception as _e:
+                logger.warning(f"page_type classify failed for page {idx + 1}: {_e}")
+                page_type = None
         except Exception as e:
             logger.error(f"Failed to build blueprint/generation_hints for page {idx+1}: {e}")
             generation_hints = None
@@ -586,8 +616,9 @@ def main():
             layout_json=layout,
             visual_json=visual_json,
             generation_hints=generation_hints,
+            page_type=page_type,
         )
-        logger.info(f"Page {idx + 1} saved.")
+        logger.info(f"Page {idx + 1} saved (page_type={page_type}).")
 
     logger.info("Template analysis complete.")
     print(f"Template ID: {template_id}")
