@@ -131,7 +131,7 @@ function renderIndex(idx){
       <div class="ptrow">
         <select id="pt-${p.template_id}-${p.page}">${opts}</select>
         <button class="mini" onclick="savePageType(${p.template_id},${p.page})">保存类型</button>
-        <button class="mini ghost" onclick="reanalyzePage(${p.template_id},${p.page})">重新分析本页</button>
+        <button class="mini ghost" onclick="reanalyzePage(${p.template_id},${p.page},this)">重新分析本页</button>
       </div>
       <div class="ptmsg" id="ptmsg-${p.template_id}-${p.page}"></div>
       </div></div>`;
@@ -149,15 +149,29 @@ async function savePageType(tid,page){
     else { msg.textContent='保存失败：'+(d.message||''); msg.style.color='#b3261e'; }
   }catch(e){ msg.textContent='保存失败：'+e; msg.style.color='#b3261e'; }
 }
-async function reanalyzePage(tid,page){
+async function reanalyzePage(tid,page,btn){
   const msg=document.getElementById(`ptmsg-${tid}-${page}`);
-  msg.textContent='请求中…'; msg.style.color='#6b7a92';
+  const label=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='分析中…'; }
+  msg.textContent='正在重新分析本页（截图+解析，可能需要 1-2 分钟）…'; msg.style.color='#6b7a92';
   try{
     const r=await fetch('/api/custom-template/reanalyze-page',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({template_id:tid,page_number:page})});
     const d=await r.json();
-    msg.textContent=(d.status==='not_implemented'?'ⓘ ':'')+(d.message||'已请求'); msg.style.color='#8a5a00';
-  }catch(e){ msg.textContent='请求失败：'+e; msg.style.color='#b3261e'; }
+    if(r.ok && d.status==='ok'){
+      msg.textContent='✓ 本页已重新分析'+(d.page_type?('：'+(PT_LABELS[d.page_type]||d.page_type)):''); msg.style.color='#1d9b54';
+      await refreshIndex();                       // pull fresh index (thumbnail/page_type/preview)
+    } else if(r.status===501 || d.status==='not_implemented'){
+      msg.textContent='ⓘ '+(d.message||'单页重新分析暂未启用'); msg.style.color='#8a5a00';
+    } else {
+      msg.textContent='重新分析失败：'+(d.message||('HTTP '+r.status)); msg.style.color='#b3261e';
+    }
+  }catch(e){ msg.textContent='重新分析失败：'+e; msg.style.color='#b3261e'; }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=label||'重新分析本页'; } }
+}
+async function refreshIndex(){
+  if(!token) return;
+  try{ const s=await (await fetch('/api/custom-template/status/'+token)).json();
+       if(s.index) renderIndex(s.index); }catch(e){ /* keep current view */ }
 }
 function showGen(){
   document.getElementById('c-gen').classList.remove('hide');

@@ -347,16 +347,15 @@ function renderOutline() {
         const d = document.createElement('div'); d.className = 'ocard' + (['cover','agenda','closing'].includes(role)?(' '+role):'');
         const opts = ptypeOptions.map(o => `<option value="${o}"${o===role?' selected':''}>${PTYPE_LABELS[o]||o}</option>`).join('');
         const showSection = !['cover','agenda','closing'].includes(role);
-        // Agenda page gets per-item inputs so editing a 一级目录 item can sync the
-        // matching body 章节归属 (Scope A+); other pages keep a points textarea.
+        // Agenda is FROZEN (Q3c-1): existing items are editable (text edit syncs the matching
+        // body 章节归属), but items cannot be added or deleted — keeps 目录 ↔ 正文 structurally
+        // stable. Other pages keep a points textarea.
         let ptsEditor;
         if (role==='agenda') {
             const rows = (p.points||[]).map((it,k)=>`<div class="agrow">
-                <input class="ag-in" value="${esc(it)}" onchange="editAgendaItem(${i},${k},this.value)" placeholder="目录项 ${k+1}">
-                <button class="agbtn" onclick="delAgendaItem(${i},${k})" title="删除">×</button></div>`).join('');
-            ptsEditor = `<div class="fld">目录项（编辑将同步对应正文页的章节归属）</div>
-                <div class="aglist">${rows}</div>
-                <button class="agadd" onclick="addAgendaItem(${i})">+ 添加目录项</button>`;
+                <input class="ag-in" value="${esc(it)}" onchange="editAgendaItem(${i},${k},this.value)" placeholder="目录项 ${k+1}"></div>`).join('');
+            ptsEditor = `<div class="fld">目录项（仅可编辑文字，编辑将同步对应正文页的章节归属；本页目录项数量已冻结，不可增删）</div>
+                <div class="aglist">${rows}</div>`;
         } else {
             const ptsLabel = role==='cover' ? '副标题 / 要点（每行一个）' : '要点（每行一个）';
             ptsEditor = `<div class="fld">${ptsLabel}</div>
@@ -403,16 +402,9 @@ function editAgendaItem(i, k, val) {
     renderOutline();
     showToast(synced ? `已同步 ${synced} 个正文页的章节归属（正文要点未自动重写，请人工确认）` : '目录项已更新');
 }
-function delAgendaItem(i, k) { (currentOutline[i].points||[]).splice(k,1); renderOutline(); }
-function addAgendaItem(i) { (currentOutline[i].points || (currentOutline[i].points=[])).push(''); renderOutline(); }
-function addToAgenda(idx) {
-    const st = (window._orphanSections||[])[idx];
-    const n = currentOutline.length; if (!st || n < 2) return;
-    currentOutline[1].points = currentOutline[1].points || [];
-    if (!currentOutline[1].points.includes(st)) currentOutline[1].points.push(st);
-    renderOutline();
-    showToast('已加入目录项');
-}
+// Agenda freeze (Q3c-1): add/delete agenda items and "加入目录" are intentionally removed.
+// Only editing existing items is allowed; orphan sections are surfaced as a warning to fix via
+// the body slide's 所属章节 field or by editing the matching 目录项.
 
 // Client-side structural check (mirrors backend _validate_confirmed_outline, advisory).
 function computeWarnings() {
@@ -444,9 +436,10 @@ function renderWarnings() {
     if (!msgs.length && !orphans.length) { box.classList.add('hide'); box.innerHTML=''; return; }
     box.classList.remove('hide');
     let html = '⚠ 结构提示（可继续生成）：<ul>' + msgs.map(x=>`<li>${esc(x)}</li>`).join('');
-    orphans.forEach((st, idx) => {
-        html += `<li>正文章节「${esc(st)}」不在目录项中
-            <button class="addtoc" onclick="addToAgenda(${idx})">加入目录</button></li>`;
+    // Agenda freeze (Q3c-1): orphan sections are surfaced as advisory warnings only — fix by editing
+    // the matching 目录项 (which syncs) or the body slide's 所属章节. No add-to-agenda button.
+    orphans.forEach((st) => {
+        html += `<li>正文章节「${esc(st)}」不在目录项中（请编辑对应目录项或本页所属章节使其一致）</li>`;
     });
     box.innerHTML = html + '</ul>';
 }

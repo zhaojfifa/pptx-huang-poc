@@ -64,6 +64,10 @@ test_with_chart.pptx
 data/*.pptx
 data/**/*.pptx
 
-# Local shell config and the Huang engineering snapshot (reference only, never committed)
+# Local shell config and the Huang engineering snapshots (reference only, never committed).
+# Note: the newest package dir name contains a space ("pptx_agent _20260525new"), so it is NOT
+# matched by the no-space rule above — guard all data/pptx_agent* reference packages explicitly.
 /.zshrc
 /data/pptx_agent_20260525/
+/data/pptx_agent*20260525*/
+/data/pptx_agent */
