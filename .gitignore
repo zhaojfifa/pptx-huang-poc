@@ -63,3 +63,7 @@ test_with_chart.pptx
 # (README, samples, templates metadata) remains trackable.
 data/*.pptx
 data/**/*.pptx
+
+# Local shell config and the Huang engineering snapshot (reference only, never committed)
+/.zshrc
+/data/pptx_agent_20260525/
