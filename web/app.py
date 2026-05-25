@@ -375,21 +375,7 @@ _PTYPE_ALIAS = {
 
 def _canon_ptype(t: str, fallback: str = "content") -> str:
     """Normalize an outline/LLM type string into the canonical editable set."""
-    return _PTYPE_ALIAS.get((_safe_str(t)).strip().lower(), fallback)
-
-
-def _safe_str(v) -> str:
-    """Q3d Scope D: coerce an outline field (title/section_title/role/point) that an LLM
-    may return as list/dict/None into a plain string before any string op or matching."""
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        return v
-    if isinstance(v, list):
-        return " ".join(_safe_str(x) for x in v)
-    if isinstance(v, dict):
-        return " ".join(_safe_str(x) for x in v.values())
-    return str(v)
+    return _PTYPE_ALIAS.get((t or "").strip().lower(), fallback)
 
 
 def _subset_page_numbers(pages: list, req_pages: int):
@@ -487,18 +473,16 @@ def _cards_to_slides(cards: list, template_key: str = None) -> dict:
             "template_page_number": c.get("template_page_number", c.get("page", i)),
             # PR-Q3b: honor the user-edited canonical page_type; fall back to raw type.
             "type": c.get("page_type") or c.get("type", "content"),
-            # Q3d Scope D: coerce text fields so a stray list/dict from the LLM never breaks
-            # downstream string ops (agenda matching, prompt injection, polish).
-            "title": _safe_str(c.get("title")),
-            "key_points": [_safe_str(p) for p in (c.get("points") or [])],
+            "title": c.get("title", ""),
+            "key_points": list(c.get("points", []) or []),
             "section_id": c.get("section_id"),
-            "section_title": _safe_str(c.get("section_title")),
-            "slide_role_under_section": _safe_str(c.get("slide_role_under_section")),
+            "section_title": c.get("section_title"),
+            "slide_role_under_section": c.get("slide_role_under_section"),
             "_total_pages": total,
             "_template_key": template_key,
             "notes": "",
         })
-    return {"title": (_safe_str(cards[0].get("title")) if cards else "企业经营汇报"), "slides": slides}
+    return {"title": (cards[0].get("title") if cards else "企业经营汇报"), "slides": slides}
 
 
 def _bigrams(text: str) -> set:
@@ -675,9 +659,7 @@ _FACT_RE = re.compile(r"[0-9０-９]|%|％|¥|亿|万|同比|环比|增长|下�
 # Final-PPTX forbidden/suspicious terms (old-template contamination + internals).
 _FORBIDDEN_TERMS = ["穿透监管", "穿透式监管", "VPN", "SD-WAN", "集团专线", "是否模型",
                     "指标规则", "模型场景", "1模型", "多个规则", "CMCC", "OneCity",
-                    "template_id", "Huang", "Kimi", "localhost", "sk-",
-                    # Q3d: additional known T5/T6 template residue tokens.
-                    "分析场景", "全级次", "全链条", "全要素"]
+                    "template_id", "Huang", "Kimi", "localhost", "sk-"]
 
 
 def _write_report(job_id: int, filename: str, data: dict):
@@ -895,38 +877,10 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
             )
             _write_report(job_id, "native_chart_rebind_report.json", chart_rebind)
             logger.info(f"Job {job_id}: native chart rebind P7 → {chart_rebind}")
-        # PR-Q2F polish + Q3d cover/agenda fidelity + residue hard-clean.
+        # PR-Q2F polish (all decks): agenda titles + numbering strip + placeholder cleanup.
         from core.deck_polish import polish_deck
         ag = _agenda_consistency(outline.get("slides", []))
-        # Q3d Scope B: cover title/subtitle come from confirmed_outline page 1 (single source of truth).
-        _slides = outline.get("slides", [])
-        _cover = _slides[0] if _slides else {}
-        def _s(v):
-            return "" if v is None else (v if isinstance(v, str)
-                   else " ".join(map(str, v)) if isinstance(v, list) else str(v))
-        _cover_title = _s(_cover.get("title"))
-        _cover_pts = _cover.get("key_points") or []
-        _cover_subtitle = _s(_cover_pts[0]) if _cover_pts else ""
-        # Q3d Scope C: ordered agenda content-slot refs from the page blueprint, so deck_polish
-        # can deterministically overwrite the agenda items with the exact body section_titles.
-        _agenda_slot_refs = []
-        try:
-            _bpc = agent._load_checkpoint(job_id, "blueprints.json")
-            _bps = _bpc.get("blueprints") if isinstance(_bpc, dict) else None
-            _aidx = ag.get("agenda_slide_index")
-            if _bps and _aidx and 1 <= _aidx <= len(_bps) and _bps[_aidx - 1]:
-                _abp = _bps[_aidx - 1]
-                _sm = _abp.get("slot_mappings") or []
-                if _sm:
-                    _agenda_slot_refs = [(m.get("shape_id"), m.get("shape_name")) for m in _sm]
-                else:
-                    _agenda_slot_refs = [(s.get("shape_id"), s.get("name"))
-                                         for s in _abp.get("slots", {}).get("content", [])]
-        except Exception as _e:
-            logger.warning(f"Job {job_id}: agenda slot refs unavailable: {_e}")
-        polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"),
-                             cover_title=_cover_title, cover_subtitle=_cover_subtitle,
-                             agenda_slot_refs=_agenda_slot_refs)
+        polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"))
         _write_report(job_id, "template_placeholder_cleanup_report.json", polish)
         logger.info(f"Job {job_id}: deck polish → {polish.get('summary')}")
         # PR-Q2G typography & slot-hierarchy polish (all decks; charts untouched).
@@ -950,18 +904,8 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
                                               "table_body_capped": typo.get("table_body_runs_capped"),
                                               "text_changed": typo.get("text_changed_shapes")}}
     except Exception as e:
-        # Q3d Scope D: never silent-fail — persist a clear job error and surface it to the UI.
-        import traceback
         logger.error(f"Generation failed for job {job_id}: {e}")
-        msg = str(e) or e.__class__.__name__
-        try:
-            _write_report(job_id, "generation_error.json",
-                          {"error": msg, "type": e.__class__.__name__,
-                           "traceback": traceback.format_exc()[-2000:]})
-        except Exception:
-            pass
-        _GEN_STATUS[job_id] = {"state": "failed", "error": msg,
-                               "message": f"生成失败：{msg}"}
+        _GEN_STATUS[job_id] = {"state": "failed", "error": str(e)}
 
 
 @app.post("/api/poc/generate")
@@ -1020,24 +964,6 @@ def poc_generate(payload: dict = Body(...)):
         logger.warning(f"Job {job_id}: agenda consistency = {agenda['overall_status']}; "
                        f"unmatched={[u['slide'] for u in agenda['unmatched_slides']]} "
                        f"orphan_items={agenda['agenda_items_without_supporting_slides']}")
-
-    # Q3d Scope A+C: confirmed_outline is the single source of truth. Derive the agenda page's
-    # items from the deduped body section_titles so 目录 ↔ 正文 always match, then persist the
-    # EFFECTIVE outline actually used for generation alongside confirmed_outline (audit trail).
-    _ag_idx = agenda.get("agenda_slide_index")
-    _ag_items = agenda.get("agenda_items") or []
-    _derivation = []
-    _slides = outline.get("slides", [])
-    if _ag_idx and _ag_items and 1 <= _ag_idx <= len(_slides):
-        _ag_slide = _slides[_ag_idx - 1]
-        if [str(p) for p in (_ag_slide.get("key_points") or [])] != [str(p) for p in _ag_items]:
-            _derivation.append(f"agenda slide {_ag_idx} key_points ← deduped body section_titles "
-                               f"({len(_ag_items)} items)")
-            _ag_slide["key_points"] = list(_ag_items)
-    effective = dict(outline)
-    effective["_derivation"] = _derivation or ["identical to confirmed_outline"]
-    agent._save_checkpoint(job_id, "effective_outline.json", agent._json_dumps(effective))
-    logger.info(f"Job {job_id}: effective_outline saved; derivation={effective['_derivation']}")
     if gate["warnings"]:
         logger.warning(f"Job {job_id}: outline quality warnings: {gate['warnings']}")
     if frag["flagged_pages"]:
@@ -1110,8 +1036,7 @@ from fastapi.responses import HTMLResponse as _HTMLResponse
 _CUSTOM_HTML_PATH = BASE_DIR / "static" / "templates" / "custom.html"
 _CUSTOM_UPLOADS: dict[str, dict] = {}   # token -> {file_path, page_count, template_name, analyze}
 _POLLUTION_KW = ["穿透监管", "穿透式监管", "CMCC", "中国移动", "中移", "OneCity",
-                 "是否模型", "指标规则", "模型场景", "司库", "VPN", "SD-WAN", "集团专网", "国资委",
-                 "分析场景", "全级次", "全链条", "全要素"]
+                 "是否模型", "指标规则", "模型场景", "司库", "VPN", "SD-WAN", "集团专网", "国资委"]
 
 
 @app.get("/custom", response_class=_HTMLResponse)

@@ -28,111 +28,9 @@ _XX_ONLY = re.compile(r"^[Xx]{2,}$")
 _XX_SUFFIX = re.compile(r"[:：]\s*[Xx]{2,}\s*$")
 
 
-# Q3d: known T5/T6 template residue tokens — any shape/cell containing one is template
-# leftover (never legitimate baosteel content) and is hard-cleaned post-render.
-_HARD_RESIDUE = ["穿透式监管", "穿透监管", "VPN", "SD-WAN", "是否模型", "分析场景",
-                 "全级次", "全链条", "全要素", "国资委", "集团专网", "集团专线",
-                 "CMCC", "中国移动", "OneCity"]
-
-
 def _is_title_shape(shape) -> bool:
     name = (shape.name or "")
     return ("标题" in name) or ("title" in name.lower())
-
-
-def fix_cover_slide(prs, cover_title, cover_subtitle, log) -> None:
-    """Q3d Scope B: force the cover (slide 1) title/subtitle to the confirmed-outline values.
-
-    Targeted, not a renderer refactor: write `cover_title` into the title-like shape (name
-    contains 标题/title, else the topmost text shape) and `cover_subtitle` into a 副标题/subtitle
-    shape if present. Guarantees the final deck's first page shows the edited cover title even
-    when blueprint slot detection mapped the title to the wrong shape."""
-    if not cover_title and not cover_subtitle:
-        return
-    try:
-        slide = list(prs.slides)[0]
-    except IndexError:
-        return
-    text_shapes = [sh for sh in slide.shapes if sh.has_text_frame]
-    if not text_shapes:
-        return
-    title_sh = next((sh for sh in text_shapes if _is_title_shape(sh)), None)
-    if title_sh is None:
-        title_sh = sorted(text_shapes, key=lambda s: (s.top or 0))[0]
-    if cover_title and title_sh is not None:
-        _set_first_para(title_sh, cover_title)
-        log["cover_set"].append({"shape": title_sh.name, "text": cover_title[:40]})
-    if cover_subtitle:
-        sub_sh = next((sh for sh in text_shapes if sh is not title_sh
-                       and (("副标题" in (sh.name or "")) or ("subtitle" in (sh.name or "").lower()))), None)
-        if sub_sh is not None:
-            _set_first_para(sub_sh, cover_subtitle)
-            log["cover_set"].append({"shape": sub_sh.name, "text": cover_subtitle[:40]})
-
-
-def clear_known_residue(prs, log) -> None:
-    """Q3d Scope E: hard-clean shapes/cells whose text contains a known residue token.
-    Runs LAST (after cover/agenda fixes) so freshly-written clean content is never blanked."""
-    for idx, slide in enumerate(prs.slides, start=1):
-        for sh in slide.shapes:
-            if sh.has_text_frame:
-                t = sh.text_frame.text
-                if t and any(term in t for term in _HARD_RESIDUE):
-                    _set_first_para(sh, "")
-                    log["residue_cleared"].append({"slide": idx, "text": t[:30]})
-            if sh.has_table:
-                for row in sh.table.rows:
-                    for cell in row.cells:
-                        ct = cell.text
-                        if ct and any(term in ct for term in _HARD_RESIDUE):
-                            _set_first_para(cell, "")
-                            log["residue_cleared"].append({"slide": idx, "cell": ct[:20]})
-
-
-def _find_shape(slide, shape_id, name):
-    """Find a shape by shape_id (preferred) then by exact name."""
-    if shape_id is not None:
-        for sh in slide.shapes:
-            if getattr(sh, "shape_id", None) == shape_id:
-                return sh
-    if name:
-        for sh in slide.shapes:
-            if (sh.name or "") == name:
-                return sh
-    return None
-
-
-def fill_agenda_deterministic(prs, agenda_slide_number, section_titles, slot_refs, log) -> bool:
-    """Q3d Scope C: overwrite the agenda page's content-slot shapes with the EXACT deduped
-    body section_titles (in order), clearing extra slots. Deterministic — does not depend on
-    detecting a repeated 'generic' value — so the rendered 目录 always matches 正文 section_title
-    (the LLM's rephrasing/numbering of the agenda items is replaced). Returns True if applied.
-
-    `slot_refs` is an ordered list of (shape_id, name) for the agenda content slots (from the
-    page blueprint's slot_mappings). If the template has fewer slots than sections, only the
-    leading sections are shown (template-side capacity; logged)."""
-    if not agenda_slide_number or not section_titles or not slot_refs:
-        return False
-    try:
-        slide = list(prs.slides)[agenda_slide_number - 1]
-    except IndexError:
-        return False
-    applied = 0
-    for i, (sid, sname) in enumerate(slot_refs):
-        sh = _find_shape(slide, sid, sname)
-        if sh is None or not sh.has_text_frame:
-            continue
-        if i < len(section_titles):
-            _set_first_para(sh, section_titles[i])
-            log["agenda_filled"].append({"slide": agenda_slide_number, "text": section_titles[i][:40]})
-            applied += 1
-        else:
-            _set_first_para(sh, "")
-            log["agenda_cleared"].append({"slide": agenda_slide_number})
-    if len(section_titles) > len(slot_refs):
-        log.setdefault("agenda_overflow", []).append(
-            {"sections": len(section_titles), "slots": len(slot_refs)})
-    return applied > 0
 
 
 def fix_agenda_slide(prs, agenda_slide_number, agenda_items, log) -> None:
@@ -230,24 +128,12 @@ def clear_placeholder_residue(prs, log) -> None:
                 log["placeholders_cleared"].append({"slide": idx, "text": t[:40]})
 
 
-def polish_deck(pptx_path: str, agenda_slide_number=None, agenda_items=None,
-                cover_title=None, cover_subtitle=None, agenda_slot_refs=None) -> dict:
+def polish_deck(pptx_path: str, agenda_slide_number=None, agenda_items=None) -> dict:
     log = {"agenda_filled": [], "agenda_cleared": [], "numbering_stripped": [],
-           "placeholders_cleared": [], "cover_set": [], "residue_cleared": []}
+           "placeholders_cleared": []}
     prs = Presentation(pptx_path)
     try:
-        fix_cover_slide(prs, cover_title, cover_subtitle, log)   # Q3d Scope B
-    except Exception as e:
-        logger.warning(f"cover fix failed: {e}")
-    try:
-        # Q3d Scope C: deterministic agenda fill from section_titles when slot refs are known;
-        # otherwise fall back to the conservative repeated-generic fixer.
-        done = False
-        if agenda_slot_refs:
-            done = fill_agenda_deterministic(prs, agenda_slide_number, agenda_items or [],
-                                             agenda_slot_refs, log)
-        if not done:
-            fix_agenda_slide(prs, agenda_slide_number, agenda_items or [], log)
+        fix_agenda_slide(prs, agenda_slide_number, agenda_items or [], log)
     except Exception as e:
         logger.warning(f"agenda fix failed: {e}")
     try:
@@ -258,10 +144,6 @@ def polish_deck(pptx_path: str, agenda_slide_number=None, agenda_items=None,
         clear_placeholder_residue(prs, log)
     except Exception as e:
         logger.warning(f"placeholder cleanup failed: {e}")
-    try:
-        clear_known_residue(prs, log)   # Q3d Scope E — runs last
-    except Exception as e:
-        logger.warning(f"residue cleanup failed: {e}")
     prs.save(pptx_path)
     log["summary"] = {k: len(v) for k, v in log.items() if isinstance(v, list)}
     return log
