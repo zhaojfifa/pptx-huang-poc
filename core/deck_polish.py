@@ -33,6 +33,54 @@ def _is_title_shape(shape) -> bool:
     return ("标题" in name) or ("title" in name.lower())
 
 
+def _find_shape(slide, shape_id, name):
+    """Find a shape by shape_id (preferred) then by exact name."""
+    if shape_id is not None:
+        for sh in slide.shapes:
+            if getattr(sh, "shape_id", None) == shape_id:
+                return sh
+    if name:
+        for sh in slide.shapes:
+            if (sh.name or "") == name:
+                return sh
+    return None
+
+
+def fill_agenda_deterministic(prs, agenda_slide_number, section_titles, slot_refs, log) -> bool:
+    """P1 (agenda-slide-only): overwrite the agenda page's content-slot shapes with the EXACT
+    deduped body section_titles (in order), clearing extra agenda slots. Deterministic — does not
+    depend on detecting a repeated 'generic' value — so the rendered 目录 matches 正文 section_title
+    (the LLM's rephrasing/numbering of the agenda items is replaced). Returns True if applied.
+
+    Scope guarantee: touches ONLY the agenda slide's content-slot shapes (identified by
+    `slot_refs` = ordered (shape_id, name) from the agenda page blueprint). Never touches any other
+    slide, never touches table cells, never cleans residue. If the template has fewer agenda slots
+    than sections, only the leading sections are shown (template-side capacity; logged as
+    agenda_overflow)."""
+    if not agenda_slide_number or not section_titles or not slot_refs:
+        return False
+    try:
+        slide = list(prs.slides)[agenda_slide_number - 1]
+    except IndexError:
+        return False
+    applied = 0
+    for i, (sid, sname) in enumerate(slot_refs):
+        sh = _find_shape(slide, sid, sname)
+        if sh is None or not sh.has_text_frame:
+            continue
+        if i < len(section_titles):
+            _set_first_para(sh, section_titles[i])
+            log["agenda_filled"].append({"slide": agenda_slide_number, "text": section_titles[i][:40]})
+            applied += 1
+        else:
+            _set_first_para(sh, "")
+            log["agenda_cleared"].append({"slide": agenda_slide_number})
+    if len(section_titles) > len(slot_refs):
+        log.setdefault("agenda_overflow", []).append(
+            {"sections": len(section_titles), "slots": len(slot_refs)})
+    return applied > 0
+
+
 def fix_agenda_slide(prs, agenda_slide_number, agenda_items, log) -> None:
     """On the agenda slide, replace generic/duplicated item text with the real section
     titles in order; clear any leftover item slots. Conservative: only touches non-title
@@ -128,12 +176,21 @@ def clear_placeholder_residue(prs, log) -> None:
                 log["placeholders_cleared"].append({"slide": idx, "text": t[:40]})
 
 
-def polish_deck(pptx_path: str, agenda_slide_number=None, agenda_items=None) -> dict:
+def polish_deck(pptx_path: str, agenda_slide_number=None, agenda_items=None,
+                agenda_slot_refs=None) -> dict:
     log = {"agenda_filled": [], "agenda_cleared": [], "numbering_stripped": [],
            "placeholders_cleared": []}
     prs = Presentation(pptx_path)
     try:
-        fix_agenda_slide(prs, agenda_slide_number, agenda_items or [], log)
+        # P1: when the agenda page's content-slot refs are known, deterministically fill the
+        # agenda items with the exact deduped body section_titles (agenda slide only). Otherwise
+        # fall back to the conservative repeated-generic fixer. No other slide is touched.
+        done = False
+        if agenda_slot_refs:
+            done = fill_agenda_deterministic(prs, agenda_slide_number, agenda_items or [],
+                                             agenda_slot_refs, log)
+        if not done:
+            fix_agenda_slide(prs, agenda_slide_number, agenda_items or [], log)
     except Exception as e:
         logger.warning(f"agenda fix failed: {e}")
     try:

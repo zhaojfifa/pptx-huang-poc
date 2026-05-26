@@ -880,7 +880,26 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
         # PR-Q2F polish (all decks): agenda titles + numbering strip + placeholder cleanup.
         from core.deck_polish import polish_deck
         ag = _agenda_consistency(outline.get("slides", []))
-        polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"))
+        # P1: pass the agenda page's content-slot refs (from the blueprint) so deck_polish can
+        # deterministically fill the agenda items with the exact deduped body section_titles.
+        # Agenda slide only — does not affect any body/table slide.
+        _agenda_slot_refs = []
+        try:
+            _bpc = agent._load_checkpoint(job_id, "blueprints.json")
+            _bps = _bpc.get("blueprints") if isinstance(_bpc, dict) else None
+            _aidx = ag.get("agenda_slide_index")
+            if _bps and _aidx and 1 <= _aidx <= len(_bps) and _bps[_aidx - 1]:
+                _abp = _bps[_aidx - 1]
+                _sm = _abp.get("slot_mappings") or []
+                if _sm:
+                    _agenda_slot_refs = [(m.get("shape_id"), m.get("shape_name")) for m in _sm]
+                else:
+                    _agenda_slot_refs = [(s.get("shape_id"), s.get("name"))
+                                         for s in _abp.get("slots", {}).get("content", [])]
+        except Exception as _e:
+            logger.warning(f"Job {job_id}: agenda slot refs unavailable: {_e}")
+        polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"),
+                             agenda_slot_refs=_agenda_slot_refs)
         _write_report(job_id, "template_placeholder_cleanup_report.json", polish)
         logger.info(f"Job {job_id}: deck polish → {polish.get('summary')}")
         # PR-Q2G typography & slot-hierarchy polish (all decks; charts untouched).
