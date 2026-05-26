@@ -46,6 +46,38 @@ def _find_shape(slide, shape_id, name):
     return None
 
 
+def fix_cover_slide(prs, cover_title, cover_subtitle, log) -> None:
+    """P1.6 (cover slide only): force the cover's visible title/subtitle to the confirmed-outline
+    values. Targeted, never a renderer/global change:
+      - title  → the visible title shape: prefer a shape whose name contains 标题/title; only if that
+                 name heuristic fails, the conservative topmost text shape.
+      - subtitle → only a shape whose name contains 副标题/subtitle (no fallback; skipped if absent).
+    Writes ONLY those one/two shapes via _set_first_para; never blanks arbitrary shapes, never touches
+    any other slide, table, or residue. Guarantees the rendered slide-1 title equals the outline title
+    even when the analyzer mapped the blueprint title slot to a wrong/invisible shape."""
+    if not cover_title and not cover_subtitle:
+        return
+    try:
+        slide = list(prs.slides)[0]
+    except IndexError:
+        return
+    text_shapes = [sh for sh in slide.shapes if sh.has_text_frame]
+    if not text_shapes:
+        return
+    title_sh = next((sh for sh in text_shapes if _is_title_shape(sh)), None)
+    if title_sh is None:
+        title_sh = sorted(text_shapes, key=lambda s: (s.top or 0))[0]  # conservative fallback only
+    if cover_title and title_sh is not None:
+        _set_first_para(title_sh, cover_title)
+        log["cover_set"].append({"shape": title_sh.name, "field": "title", "text": cover_title[:40]})
+    if cover_subtitle:
+        sub_sh = next((sh for sh in text_shapes if sh is not title_sh
+                       and (("副标题" in (sh.name or "")) or ("subtitle" in (sh.name or "").lower()))), None)
+        if sub_sh is not None:
+            _set_first_para(sub_sh, cover_subtitle)
+            log["cover_set"].append({"shape": sub_sh.name, "field": "subtitle", "text": cover_subtitle[:40]})
+
+
 def fill_agenda_deterministic(prs, agenda_slide_number, section_titles, slot_refs, log) -> bool:
     """P1 (agenda-slide-only): overwrite the agenda page's content-slot shapes with the EXACT
     deduped body section_titles (in order), clearing extra agenda slots. Deterministic — does not
@@ -177,10 +209,14 @@ def clear_placeholder_residue(prs, log) -> None:
 
 
 def polish_deck(pptx_path: str, agenda_slide_number=None, agenda_items=None,
-                agenda_slot_refs=None) -> dict:
+                agenda_slot_refs=None, cover_title=None, cover_subtitle=None) -> dict:
     log = {"agenda_filled": [], "agenda_cleared": [], "numbering_stripped": [],
-           "placeholders_cleared": []}
+           "placeholders_cleared": [], "cover_set": []}
     prs = Presentation(pptx_path)
+    try:
+        fix_cover_slide(prs, cover_title, cover_subtitle, log)   # P1.6 cover slide only
+    except Exception as e:
+        logger.warning(f"cover fix failed: {e}")
     try:
         # P1: when the agenda page's content-slot refs are known, deterministically fill the
         # agenda items with the exact deduped body section_titles (agenda slide only). Otherwise

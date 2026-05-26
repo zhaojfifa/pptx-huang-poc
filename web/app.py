@@ -898,8 +898,19 @@ def _run_generation(job_id: int, outline: dict, doc_md: str, template: dict):
                                          for s in _abp.get("slots", {}).get("content", [])]
         except Exception as _e:
             logger.warning(f"Job {job_id}: agenda slot refs unavailable: {_e}")
+        # P1.6: cover title/subtitle come from confirmed_outline page 1 (single source of truth).
+        # Slide 1 only; no body/table/agenda change. subtitle = first cover point if present.
+        _slides = outline.get("slides", [])
+        _cover = _slides[0] if _slides else {}
+        def _cv(v):
+            return "" if v is None else (v if isinstance(v, str) else
+                   " ".join(str(x) for x in v) if isinstance(v, list) else str(v))
+        _cover_title = _cv(_cover.get("title"))
+        _cover_pts = _cover.get("key_points") or []
+        _cover_subtitle = _cv(_cover_pts[0]) if _cover_pts else ""
         polish = polish_deck(final_path, ag.get("agenda_slide_index"), ag.get("agenda_items"),
-                             agenda_slot_refs=_agenda_slot_refs)
+                             agenda_slot_refs=_agenda_slot_refs,
+                             cover_title=_cover_title, cover_subtitle=_cover_subtitle)
         _write_report(job_id, "template_placeholder_cleanup_report.json", polish)
         logger.info(f"Job {job_id}: deck polish → {polish.get('summary')}")
         # PR-Q2G typography & slot-hierarchy polish (all decks; charts untouched).
